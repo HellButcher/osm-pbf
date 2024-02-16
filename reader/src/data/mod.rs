@@ -76,7 +76,7 @@ impl Block for PrimitiveBlock {
     fn from_message(mut pbf: PbfPrimitiveBlock) -> Result<Self> {
         let strings = if let Some(st) = pbf.stringtable.take() {
             st.s.into_iter()
-                .map(String::from_utf8)
+                .map(|b| String::from_utf8(b.into()))
                 .collect::<Result<Vec<String>, FromUtf8Error>>()?
         } else {
             Vec::new()
