@@ -2,12 +2,12 @@
 name = "osm-pbf-reader"
 version = "0.1.0-alpha.4"
 description = "OpenStreetMap PBF reader"
-authors = ["Christoph Hommelsheim <hellbutcher@gmx.de>"]
-license = "BSD-2-Clause"
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+repository.workspace = true
 keywords = ["osm", "openstreetmaps", "pbf", "osm-pbf"]
-repository = "https://github.com/HellButcher/osm-pbf-reader.git"
 readme = "README.md"
-edition = "2021"
 
 [features]
 default = ["zlib-ng-compat", "lzma"]
@@ -16,9 +16,9 @@ zlib-ng-compat = ["zlib", "flate2/zlib-ng-compat"]
 lzma = ["xz2"]
 
 [dependencies]
-osm-pbf-proto = "0.1.0-alpha.2"
+osm-pbf-proto = { version = "0.1.0-alpha.3", path = "../proto" }
 flate2 = { version = "1.0", default-features = false }
 xz2 = { version = "0.1", optional = true }
-byteorder = "1.4"
-bitflags = "2.2"
+byteorder = "1.5"
+bitflags = "2.4"
 thiserror = "1.0"
