@@ -1,13 +1,14 @@
 #!/bin/bash
 set -e
 
+cd "$(dirname "$0")/.."
 REMOTE=https://github.com/openstreetmap/OSM-binary.git
-TARGET_PREFIX=src/protos
+TARGET_PREFIX=proto/src/protos
 
 git remote add --no-tags osm-binary $REMOTE || true
 git fetch --depth=1 osm-binary HEAD:osm-binary-main
 git co osm-binary-main
-git subtree split --prefix=src/ -b osm-binary-split-src
+git subtree split --prefix=osmpbf/ -b osm-binary-split-src
 git co osm-binary-split-src
 git branch -D osm-binary-main
 
