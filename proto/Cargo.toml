@@ -1,0 +1,16 @@
+[package]
+name = "osm-pbf-proto"
+version = "0.1.0-alpha.3"
+description = "OpenStreetMap PBF-Format data-structures"
+authors = ["Christoph Hommelsheim <hellbutcher@gmx.de>"]
+license = "BSD-2-Clause"
+keywords = ["osm", "openstreetmaps", "pbf", "protobuf", "osm-pbf"]
+repository = "https://github.com/HellButcher/osm-pbf-proto.git"
+readme = "README.md"
+edition = "2021"
+
+[dependencies]
+protobuf = "3.3.0"
+
+[build-dependencies]
+protobuf-codegen = "3.3.0"
