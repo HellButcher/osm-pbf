@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = []
+
+[workspace.package]
+version = "0.1.0-alpha"
+authors = ["Christoph Hommelsheim <main@chommel.en>"]
+license = "MIT"
+repository = "https://github.com/HellButcher/osm-pbf.git"
+edition = "2021"
+
