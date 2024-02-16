@@ -22,7 +22,7 @@ pub struct Blob<M> {
 impl<M> Blob<M> {
     #[inline]
     const fn new(header: PbfBlobHeader, blob: PbfBlob) -> Self {
-        Blob {
+        Self {
             header,
             blob,
             phantom: PhantomData,
@@ -63,7 +63,7 @@ pub trait Block: Sized {
     }
 
     #[inline]
-    fn parse_from(is: &mut CodedInputStream) -> Result<Self> {
+    fn parse_from(is: &mut CodedInputStream<'_>) -> Result<Self> {
         let msg = Self::Message::parse_from(is)?;
         let block = Self::from_message(msg)?;
         Ok(block)
@@ -113,7 +113,7 @@ impl<R: AsRef<[u8]>> Blobs<io::Cursor<R>> {
     }
 }
 
-impl<R: io::Read> Blobs<io::BufReader<R>> {
+impl<R: Read> Blobs<io::BufReader<R>> {
     #[inline]
     pub fn from_read(read: R) -> Self {
         Self(io::BufReader::new(read))
@@ -128,7 +128,7 @@ impl<R: io::Seek> Blobs<R> {
     }
 }
 
-impl<R: io::BufRead> Blobs<R> {
+impl<R: BufRead> Blobs<R> {
     #[inline]
     pub fn from_buf_read(read: R) -> Self {
         Self(read)
@@ -175,7 +175,7 @@ impl<R: io::BufRead> Blobs<R> {
     }
 }
 
-impl<R: io::BufRead> iter::Iterator for Blobs<R> {
+impl<R: BufRead> Iterator for Blobs<R> {
     type Item = Result<OSMDataBlob>;
 
     fn next(&mut self) -> Option<Result<OSMDataBlob>> {
@@ -197,4 +197,4 @@ impl<R: io::BufRead> iter::Iterator for Blobs<R> {
     }
 }
 
-impl<R: io::BufRead> iter::FusedIterator for Blobs<R> {}
+impl<R: BufRead> iter::FusedIterator for Blobs<R> {}

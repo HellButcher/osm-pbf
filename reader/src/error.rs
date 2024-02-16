@@ -36,6 +36,6 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 impl From<std::io::ErrorKind> for Error {
     #[inline(always)]
     fn from(kind: std::io::ErrorKind) -> Self {
-        Error::IoError(kind.into())
+        Self::IoError(kind.into())
     }
 }

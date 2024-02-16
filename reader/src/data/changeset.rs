@@ -9,7 +9,7 @@ pub struct ChangeSet {
 impl ChangeSet {
     #[inline]
     pub(crate) fn from_pbf(n: &PbfChangeSet) -> Self {
-        ChangeSet {
+        Self {
             id: ChangeSetId(n.id()),
         }
     }

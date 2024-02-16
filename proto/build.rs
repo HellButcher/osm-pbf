@@ -9,7 +9,7 @@ fn main() {
     protobuf_codegen::Codegen::new()
         .pure()
         .cargo_out_dir("protos-gen")
-        .includes(&["src/protos"])
+        .includes(["src/protos"])
         .inputs(PROTOS)
         .customize(Customize::default().lite_runtime(true).tokio_bytes(true))
         .run_from_script();

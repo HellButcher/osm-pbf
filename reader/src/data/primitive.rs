@@ -19,10 +19,10 @@ bitflags! {
 
 #[non_exhaustive]
 pub enum Primitive<'l> {
-    Node(super::node::Node<'l>),
-    Way(super::way::Way<'l>),
-    Relation(super::relation::Relation<'l>),
-    ChangeSet(super::changeset::ChangeSet),
+    Node(Node<'l>),
+    Way(Way<'l>),
+    Relation(Relation<'l>),
+    ChangeSet(ChangeSet),
 }
 
 pub struct Primitives<'l> {
