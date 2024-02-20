@@ -17,8 +17,8 @@ lzma = ["xz2"]
 
 [dependencies]
 osm-pbf-proto = { version = "0.1.0-alpha.3", path = "../proto" }
+bytes = { version = "1.5", features = ["std"] }
 flate2 = { version = "1.0", default-features = false }
 xz2 = { version = "0.1", optional = true }
 byteorder = "1.5"
-bitflags = "2.4"
 thiserror = "1.0"

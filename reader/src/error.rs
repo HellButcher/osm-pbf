@@ -1,4 +1,4 @@
-use std::string::FromUtf8Error;
+use std::str::Utf8Error;
 
 use thiserror::Error;
 
@@ -12,7 +12,7 @@ pub enum Error {
     ProtobufError(#[from] osm_pbf_proto::protobuf::Error),
 
     #[error(transparent)]
-    Utf8Error(#[from] FromUtf8Error),
+    Utf8Error(#[from] Utf8Error),
 
     // The length of the BlobHeader [..] must be less than 64 KiB.
     // https://wiki.openstreetmap.org/wiki/PBF_Format

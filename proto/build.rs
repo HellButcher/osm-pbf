@@ -11,6 +11,11 @@ fn main() {
         .cargo_out_dir("protos-gen")
         .includes(["src/protos"])
         .inputs(PROTOS)
-        .customize(Customize::default().lite_runtime(true).tokio_bytes(true))
+        .customize(
+            Customize::default()
+                .lite_runtime(true)
+                .tokio_bytes(true)
+                .tokio_bytes_for_string(true),
+        )
         .run_from_script();
 }
