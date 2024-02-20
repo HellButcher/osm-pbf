@@ -82,6 +82,23 @@ impl<'l> NodeRef<'l> {
         }
     }
 
+    #[inline]
+    pub const fn id(&self) -> i64 {
+        self.id
+    }
+
+    /// Latitude in degrees.
+    #[inline]
+    pub fn lat(&self) -> f64 {
+        self.nano_lat as f64 * 1e-9
+    }
+
+    /// Longitude in degrees.
+    #[inline]
+    pub fn lon(&self) -> f64 {
+        self.nano_lon as f64 * 1e-9
+    }
+
     pub fn info(&self) -> Info {
         match self.data {
             NodeData::Node { info, .. } => info.clone(),
