@@ -1,6 +1,6 @@
 [package]
 name = "osm-pbf-proto"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 description = "OpenStreetMap PBF-Format data-structures"
 authors.workspace = true
 license.workspace = true
