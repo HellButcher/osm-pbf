@@ -12,3 +12,6 @@ license = "MIT"
 repository = "https://github.com/HellButcher/osm-pbf.git"
 edition = "2021"
 
+[workspace.metadata.release]
+shared-version = true
+tag-prefix = ""
