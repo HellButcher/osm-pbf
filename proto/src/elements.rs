@@ -363,11 +363,11 @@ impl<'msg> Iterator for DenseNodeTagsIter<'msg> {
 /// [`DenseNodes`]: crate::protos::DenseNodes
 pub struct DenseNode<'msg> {
     /// Node ID (DELTA-decoded).
-    pub id: i64,
+    id: i64,
     /// Raw latitude value (DELTA-decoded; same encoding as [`NodeView::lat`]).
-    pub lat: i64,
+    lat: i64,
     /// Raw longitude value (DELTA-decoded; same encoding as [`NodeView::lon`]).
-    pub lon: i64,
+    lon: i64,
     keys_vals: RepeatedView<'msg, i32>,
     kv_start: usize,
     kv_end: usize,
@@ -375,6 +375,21 @@ pub struct DenseNode<'msg> {
 }
 
 impl<'msg> DenseNode<'msg> {
+    #[inline]
+    pub fn id(&self) -> i64 {
+        self.id
+    }
+
+    #[inline]
+    pub fn lat(&self) -> i64 {
+        self.lat
+    }
+
+    #[inline]
+    pub fn lon(&self) -> i64 {
+        self.lon
+    }
+
     /// Returns map-like access to this node's tags.
     #[inline]
     pub fn tags(&self) -> DenseNodeTags<'msg> {
@@ -442,6 +457,8 @@ impl<'msg> Iterator for DenseNodesIter<'msg> {
             // keys_vals omitted — all nodes in this group are tagless.
             kv_start
         } else {
+            // TODO: try to optimize, by not requiring the kv_end bound on each iteration. (then DenseTaghs is not an exact-size iterator anymore)
+
             // Scan for the 0-delimiter that terminates this node's tag pairs.
             loop {
                 if self.kv_pos >= kv_len {
@@ -498,7 +515,7 @@ impl<'msg> NodeRef<'msg> {
     pub fn id(&self) -> i64 {
         match self {
             Self::Regular(n) => n.id(),
-            Self::Dense(n) => n.id,
+            Self::Dense(n) => n.id(),
         }
     }
 
@@ -509,7 +526,7 @@ impl<'msg> NodeRef<'msg> {
     pub fn lat(&self) -> i64 {
         match self {
             Self::Regular(n) => n.lat(),
-            Self::Dense(n) => n.lat,
+            Self::Dense(n) => n.lat(),
         }
     }
 
@@ -520,7 +537,7 @@ impl<'msg> NodeRef<'msg> {
     pub fn lon(&self) -> i64 {
         match self {
             Self::Regular(n) => n.lon(),
-            Self::Dense(n) => n.lon,
+            Self::Dense(n) => n.lon(),
         }
     }
 }
@@ -591,9 +608,7 @@ impl<'msg> PrimitiveGroupView<'msg> {
     /// Returns an empty iterator if this group has no dense nodes.
     #[inline]
     pub fn iter_dense_nodes(self, stringtable: StringTableView<'msg>) -> DenseNodesIter<'msg> {
-        let st = stringtable.s();
-        let dense = self.dense();
-        DenseNodesIter::new(dense, st)
+        DenseNodesIter::new(self.dense(), stringtable.s())
     }
 
     /// Returns an iterator over **all** nodes in this group as uniform
