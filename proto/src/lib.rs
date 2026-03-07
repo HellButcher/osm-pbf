@@ -1,6 +1,9 @@
 // re-export of protobuf
 pub use protobuf;
 
-include!(concat!(env!("OUT_DIR"), "/protos-gen/mod.rs"));
+#[allow(clippy::all)]
+pub mod protos {
+    include!(concat!(env!("OUT_DIR"), "/protobuf_generated/generated.rs"));
+}
 
 pub mod elements;
