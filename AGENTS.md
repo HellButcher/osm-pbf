@@ -53,25 +53,51 @@ Every message produces a tripartite set of types:
 |---|---|
 | `Tags<'msg>` | Map-like tag access for `Node`/`Way`/`Relation` (parallel `keys`/`vals` u32 arrays) |
 | `TagsIter<'msg>` | Iterator yielding `(&'msg str, &'msg str)` |
-| `DenseNodeTags<'msg>` | Tag access for a single `DenseNode` (slice of `keys_vals`) |
+| `DenseNodeTags<'msg>` | Tag access for a single `DenseNodeRef` (slice of `keys_vals`; bounded by `kv_end`) |
 | `DenseNodeTagsIter<'msg>` | Iterator over a single dense node's tags |
-| `DenseNode<'msg>` | Decoded dense node: `id: i64`, `lat: i64`, `lon: i64` (all delta-decoded), plus tags |
-| `DenseNodesIter<'msg>` | Stateful iterator over `DenseNodesView`; accumulates delta-coded id/lat/lon |
-| `NodeRef<'msg>` | Enum `Regular(NodeView)` \| `Dense(DenseNode)` with uniform `id()`/`lat()`/`lon()` |
-| `Element<'msg>` | Enum over all group element types: Node, DenseNode, Way, Relation, Changeset |
+| `DenseNodeRef<'msg>` | Decoded dense node: `id: i64`, `lat: i64`, `lon: i64` (all delta-decoded) + `PrimitiveGroupRef`; adds `lat_deg()`, `lon_deg()`, `tags()` |
+| `DenseNodeRefsIter<'msg>` | Stateful iterator over `DenseNodesView`; accumulates delta-coded id/lat/lon |
+| `AnyNodeRef<'msg>` | Enum `Regular(NodeRef)` \| `Dense(DenseNodeRef)` with uniform `id()`, `lat()`, `lon()`, `lat_deg()`, `lon_deg()`; match for tags |
+| `PrimitiveGroupRef<'msg>` | Group view + parent block + string table; entry point for group-level iteration |
+| `AbstractRef<'msg, T>` | Generic wrapper bundling a protobuf `View` with a `PrimitiveGroupRef`; derefs to the inner view; exposes `.group()` |
+| `NodeRef<'msg>` | `AbstractRef<'msg, Node>` — adds `tags()`, `lat_deg()`, `lon_deg()` |
+| `WayRef<'msg>` | `AbstractRef<'msg, Way>` — adds `tags()` |
+| `RelationRef<'msg>` | `AbstractRef<'msg, Relation>` — adds `tags()` |
+| `ChangeSetRef<'msg>` | `AbstractRef<'msg, ChangeSet>` |
+| `Element<'msg>` | Enum over all group element types: `Node(AnyNodeRef)`, `Way(WayRef)`, `Relation(RelationRef)`, `Changeset(ChangeSetRef)` |
+| `ElementTypes` | `bitflags` bitset — `NODES \| WAYS \| RELATIONS \| CHANGESETS`; used with `iter_filtered_elements` |
 | `decode_coordinate(raw, offset, granularity)` | Degrees = 1e-9 × (offset + granularity × raw) |
 
-Inherent `impl` extensions added to generated view types (valid because `primitives.rs` is in the same crate):
+Iterator methods on `PrimitiveGroupRef<'msg>`:
 
-| Type | Method added |
+| Method | Yields |
 |---|---|
-| `NodeView`, `WayView`, `RelationView` | `.tags(stringtable) -> Tags<'msg>` |
-| `DenseNodesView` | `.iter_nodes(stringtable) -> DenseNodesIter<'msg>` |
-| `PrimitiveGroupView` | `.iter_nodes()`, `.iter_dense_nodes(st)`, `.iter_all_nodes(st)`, `.iter_ways()`, `.iter_relations()`, `.iter_changesets()`, `.iter_elements(st)` |
+| `.iter_nodes()` | `NodeRef<'msg>` (regular nodes only) |
+| `.iter_dense_nodes()` | `DenseNodeRef<'msg>` (dense nodes only) |
+| `.iter_all_nodes()` | `AnyNodeRef<'msg>` (all nodes) |
+| `.iter_ways()` | `WayRef<'msg>` |
+| `.iter_relations()` | `RelationRef<'msg>` |
+| `.iter_changesets()` | `ChangeSetRef<'msg>` |
+| `.iter_elements()` | `Element<'msg>` (all elements, all types) |
+| `.iter_filtered_elements(types)` | `Element<'msg>` (filtered; skips entire group if type not in `types`) |
+
+Iterator methods on `PrimitiveBlockView<'msg>` (fold across all groups):
+
+| Method | Yields |
+|---|---|
+| `.iter_groups()` | `PrimitiveGroupRef<'msg>` |
+| `.iter_nodes()` | `NodeRef<'msg>` |
+| `.iter_dense_nodes()` | `DenseNodeRef<'msg>` |
+| `.iter_all_nodes()` | `AnyNodeRef<'msg>` |
+| `.iter_ways()` | `WayRef<'msg>` |
+| `.iter_relations()` | `RelationRef<'msg>` |
+| `.iter_changesets()` | `ChangeSetRef<'msg>` |
+| `.iter_elements()` | `Element<'msg>` |
+| `.iter_filtered_elements(types)` | `Element<'msg>` (skips groups whose type is absent from `types`) |
 
 #### OSM PBF encoding notes (relevant to `primitives.rs`)
 
-- **Coordinates**: `lat`/`lon`/`id` in `DenseNodes` are delta-encoded; `DenseNodesIter` accumulates running sums. Regular `NodeView` fields are absolute.
+- **Coordinates**: `lat`/`lon`/`id` in `DenseNodes` are delta-encoded across the sequence: each stored value is the *difference* from the previous node's value. `DenseNodeRefsIter` accumulates running sums. Regular `NodeView` fields are absolute.
 - **`keys_vals` type mismatch**: The official spec declares `DenseNodes.keys_vals` as `repeated uint32`, but the `.proto` files use `int32`. **Always cast to `u32` before use** — values that appear negative as `i32` are simply large indices. `0` is the only sentinel (node delimiter); it is never a valid key or value index.
 - **DenseNodes tag pattern**: `((<key_idx> <val_idx>)* 0)*` — one `0` per node even for tagless nodes. Exception: if **all** nodes in the group are tagless, `keys_vals` is omitted entirely (empty array).
 - **String table**: index `0` is always the empty-string sentinel; never a valid key/value reference.
