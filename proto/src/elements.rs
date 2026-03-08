@@ -289,7 +289,7 @@ pub struct ElementsIter<'l> {
 
 impl PrimitiveBlock {
     #[inline]
-    pub fn primitives(&self) -> ElementsIter<'_> {
+    pub fn iter_elements(&self) -> ElementsIter<'_> {
         ElementsIter {
             block: self,
             groups: &self.primitivegroup,
@@ -300,7 +300,7 @@ impl PrimitiveBlock {
         }
     }
     #[inline]
-    pub fn primitivegroup(&self, i: usize) -> Option<PrimitiveGroupRef<'_>> {
+    pub fn iter_primitivegroup(&self, i: usize) -> Option<PrimitiveGroupRef<'_>> {
         Some(PrimitiveGroupRef {
             value: self.primitivegroup.get(i)?,
             block: self,
@@ -310,11 +310,16 @@ impl PrimitiveBlock {
 
 impl<'l> PrimitiveGroupRef<'l> {
     #[inline]
-    pub fn primitives(self) -> ElementsIter<'l> {
+    pub fn iter_elements(self) -> ElementsIter<'l> {
+        self.iter_filtered_elements(ElementType::DEFAULT)
+    }
+
+    #[inline]
+    pub fn iter_filtered_elements(self, types: ElementType) -> ElementsIter<'l> {
         ElementsIter {
             block: self.block,
             groups: std::slice::from_ref(self.value),
-            filter: ElementType::DEFAULT,
+            filter: types,
             group_pos: 0,
             prim_pos: 0,
             dense_state: DenseState::default(),
@@ -335,7 +340,7 @@ impl<'l> IntoIterator for &'l PrimitiveBlock {
     type IntoIter = ElementsIter<'l>;
     #[inline]
     fn into_iter(self) -> ElementsIter<'l> {
-        self.primitives()
+        self.iter_elements()
     }
 }
 
@@ -344,7 +349,7 @@ impl<'l> IntoIterator for PrimitiveGroupRef<'l> {
     type IntoIter = ElementsIter<'l>;
     #[inline]
     fn into_iter(self) -> ElementsIter<'l> {
-        self.primitives()
+        self.iter_elements()
     }
 }
 
