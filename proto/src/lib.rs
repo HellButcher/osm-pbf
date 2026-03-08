@@ -3,4 +3,4 @@ pub use protobuf;
 
 include!(concat!(env!("OUT_DIR"), "/protos-gen/mod.rs"));
 
-pub mod primitives;
+pub mod elements;

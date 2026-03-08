@@ -9,7 +9,7 @@ use crate::osmformat::{
 };
 
 bitflags! {
-    pub struct PrimitiveType: u32 {
+    pub struct ElementType: u32 {
         const NODE = 1;
         const WAY = 2;
         const RELATION = 4;
@@ -20,22 +20,22 @@ bitflags! {
 }
 
 #[derive(Copy, Clone)]
-pub struct PrimitiveRef<'l, T: ?Sized> {
+pub struct AbstractRef<'l, T: ?Sized> {
     value: &'l T,
     block: &'l PrimitiveBlock,
 }
 
-impl<T: ?Sized> Deref for PrimitiveRef<'_, T> {
+impl<T: ?Sized> Deref for AbstractRef<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
         self.value
     }
 }
 
-pub type PrimitiveGroupRef<'l> = PrimitiveRef<'l, PrimitiveGroup>;
-pub type WayRef<'l> = PrimitiveRef<'l, Way>;
-pub type RelationRef<'l> = PrimitiveRef<'l, Relation>;
-pub type ChangeSetRef<'l> = PrimitiveRef<'l, ChangeSet>;
+pub type PrimitiveGroupRef<'l> = AbstractRef<'l, PrimitiveGroup>;
+pub type WayRef<'l> = AbstractRef<'l, Way>;
+pub type RelationRef<'l> = AbstractRef<'l, Relation>;
+pub type ChangeSetRef<'l> = AbstractRef<'l, ChangeSet>;
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct NodeRef<'l> {
@@ -87,15 +87,27 @@ impl<'l> NodeRef<'l> {
         self.id
     }
 
+    /// Latitude in nano-degrees.
+    #[inline]
+    pub fn lat_nano(&self) -> i64 {
+        self.nano_lat
+    }
+
+    /// Longitude in nano-degrees.
+    #[inline]
+    pub fn lon_nano(&self) -> i64 {
+        self.nano_lon
+    }
+
     /// Latitude in degrees.
     #[inline]
-    pub fn lat(&self) -> f64 {
+    pub fn lat_deg(&self) -> f64 {
         self.nano_lat as f64 * 1e-9
     }
 
     /// Longitude in degrees.
     #[inline]
-    pub fn lon(&self) -> f64 {
+    pub fn lon_deg(&self) -> f64 {
         self.nano_lon as f64 * 1e-9
     }
 
@@ -259,17 +271,17 @@ impl<'l> Iterator for Tags<'l> {
 impl<'l> std::iter::FusedIterator for Tags<'l> {}
 
 #[non_exhaustive]
-pub enum Primitive<'l> {
+pub enum Element<'l> {
     Node(NodeRef<'l>),
     Way(WayRef<'l>),
     Relation(RelationRef<'l>),
     ChangeSet(ChangeSetRef<'l>),
 }
 
-pub struct PrimitivesIter<'l> {
+pub struct ElementsIter<'l> {
     block: &'l PrimitiveBlock,
     groups: &'l [PrimitiveGroup],
-    filter: PrimitiveType,
+    filter: ElementType,
     group_pos: usize,
     prim_pos: usize,
     dense_state: DenseState,
@@ -277,11 +289,11 @@ pub struct PrimitivesIter<'l> {
 
 impl PrimitiveBlock {
     #[inline]
-    pub fn primitives(&self) -> PrimitivesIter<'_> {
-        PrimitivesIter {
+    pub fn primitives(&self) -> ElementsIter<'_> {
+        ElementsIter {
             block: self,
             groups: &self.primitivegroup,
-            filter: PrimitiveType::DEFAULT,
+            filter: ElementType::DEFAULT,
             group_pos: 0,
             prim_pos: 0,
             dense_state: DenseState::default(),
@@ -298,11 +310,11 @@ impl PrimitiveBlock {
 
 impl<'l> PrimitiveGroupRef<'l> {
     #[inline]
-    pub fn primitives(self) -> PrimitivesIter<'l> {
-        PrimitivesIter {
+    pub fn primitives(self) -> ElementsIter<'l> {
+        ElementsIter {
             block: self.block,
             groups: std::slice::from_ref(self.value),
-            filter: PrimitiveType::DEFAULT,
+            filter: ElementType::DEFAULT,
             group_pos: 0,
             prim_pos: 0,
             dense_state: DenseState::default(),
@@ -310,44 +322,44 @@ impl<'l> PrimitiveGroupRef<'l> {
     }
 }
 
-impl<'l> PrimitivesIter<'l> {
+impl<'l> ElementsIter<'l> {
     #[inline]
-    pub fn filter_types(mut self, types: PrimitiveType) -> Self {
+    pub fn filter_types(mut self, types: ElementType) -> Self {
         self.filter = types;
         self
     }
 }
 
 impl<'l> IntoIterator for &'l PrimitiveBlock {
-    type Item = Primitive<'l>;
-    type IntoIter = PrimitivesIter<'l>;
+    type Item = Element<'l>;
+    type IntoIter = ElementsIter<'l>;
     #[inline]
-    fn into_iter(self) -> PrimitivesIter<'l> {
+    fn into_iter(self) -> ElementsIter<'l> {
         self.primitives()
     }
 }
 
 impl<'l> IntoIterator for PrimitiveGroupRef<'l> {
-    type Item = Primitive<'l>;
-    type IntoIter = PrimitivesIter<'l>;
+    type Item = Element<'l>;
+    type IntoIter = ElementsIter<'l>;
     #[inline]
-    fn into_iter(self) -> PrimitivesIter<'l> {
+    fn into_iter(self) -> ElementsIter<'l> {
         self.primitives()
     }
 }
 
-impl<'l> Iterator for PrimitivesIter<'l> {
-    type Item = Primitive<'l>;
+impl<'l> Iterator for ElementsIter<'l> {
+    type Item = Element<'l>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let group = self.groups.get(self.group_pos)?;
-            if self.filter.contains(PrimitiveType::NODE) && !group.nodes.is_empty() {
+            if self.filter.contains(ElementType::NODE) && !group.nodes.is_empty() {
                 let index = self.prim_pos;
                 if let Some(n) = group.nodes.get(index) {
                     self.prim_pos = index + 1;
-                    return Some(Primitive::Node(NodeRef::from_node(index, n, self.block)));
+                    return Some(Element::Node(NodeRef::from_node(index, n, self.block)));
                 }
-            } else if self.filter.contains(PrimitiveType::NODE) && group.dense.is_some() {
+            } else if self.filter.contains(ElementType::NODE) && group.dense.is_some() {
                 let dense = &group.dense;
                 let index = self.prim_pos;
                 if let (Some(id), Some(lat), Some(lon)) = (
@@ -378,32 +390,31 @@ impl<'l> Iterator for PrimitivesIter<'l> {
                         &dense.denseinfo,
                         self.block,
                     );
-                    return Some(Primitive::Node(n));
+                    return Some(Element::Node(n));
                 }
                 // reset dense state for next group
                 self.dense_state = DenseState::default();
-            } else if self.filter.contains(PrimitiveType::WAY) && !group.ways.is_empty() {
+            } else if self.filter.contains(ElementType::WAY) && !group.ways.is_empty() {
                 if let Some(w) = group.ways.get(self.prim_pos) {
                     self.prim_pos += 1;
-                    return Some(Primitive::Way(PrimitiveRef {
+                    return Some(Element::Way(AbstractRef {
                         value: w,
                         block: self.block,
                     }));
                 }
-            } else if self.filter.contains(PrimitiveType::RELATION) && !group.relations.is_empty() {
+            } else if self.filter.contains(ElementType::RELATION) && !group.relations.is_empty() {
                 if let Some(r) = group.relations.get(self.prim_pos) {
                     self.prim_pos += 1;
-                    return Some(Primitive::Relation(PrimitiveRef {
+                    return Some(Element::Relation(AbstractRef {
                         value: r,
                         block: self.block,
                     }));
                 }
-            } else if self.filter.contains(PrimitiveType::CHANGE_SET)
-                && !group.changesets.is_empty()
+            } else if self.filter.contains(ElementType::CHANGE_SET) && !group.changesets.is_empty()
             {
                 if let Some(c) = group.changesets.get(self.prim_pos) {
                     self.prim_pos += 1;
-                    return Some(Primitive::ChangeSet(PrimitiveRef {
+                    return Some(Element::ChangeSet(AbstractRef {
                         value: c,
                         block: self.block,
                     }));

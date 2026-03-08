@@ -1,5 +1,4 @@
 use byteorder::{BigEndian, ReadBytesExt};
-use bytes::Buf;
 use osm_pbf_proto::fileformat::blob::Data;
 pub use osm_pbf_proto::fileformat::{Blob as PbfBlob, BlobHeader as PbfBlobHeader};
 use osm_pbf_proto::osmformat::{HeaderBlock, PrimitiveBlock as PbfPrimitiveBlock};
@@ -19,19 +18,6 @@ const MAX_UNCOMPRESSED_DATA_SIZE: usize = 32 * 1024 * 1024;
 pub enum Blob<M> {
     Encoded(PbfBlob),
     Decoded(M),
-}
-
-impl<M> Blob<M> {
-    const INST: Self = Self::Encoded(PbfBlob {
-        raw_size: None,
-        data: None,
-        special_fields: pb::SpecialFields::new(),
-    });
-
-    #[inline]
-    const fn new(blob: PbfBlob) -> Self {
-        Self::Encoded(blob)
-    }
 }
 
 impl<M> Default for Blob<M> {
@@ -265,25 +251,6 @@ impl<R: io::BufRead> Blobs<R> {
         let decoded = Blob::parse_and_decode(&mut input)?;
         input.check_eof()?;
         Ok(Some(decoded))
-    }
-}
-
-impl<R: io::BufRead + io::Seek> Blobs<R> {
-    fn next_blob_with(
-        &mut self,
-        cond: impl Fn(&PbfBlobHeader) -> bool,
-    ) -> Result<Option<(PbfBlobHeader, PbfBlob)>> {
-        loop {
-            let Some(header) = self._read_blob_header()? else {
-                return Ok(None);
-            };
-            if cond(&header) {
-                let blob: PbfBlob = self.read_msg_exact((header.datasize() as u32) as usize)?;
-                return Ok(Some((header, blob)));
-            }
-            self.reader
-                .seek(io::SeekFrom::Current((header.datasize() as u32) as i64))?;
-        }
     }
 }
 
