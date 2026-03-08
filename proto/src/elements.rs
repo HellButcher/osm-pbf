@@ -162,9 +162,9 @@ impl<'msg> Tags<'msg> {
     /// Returns `true` if this element has a tag with the given key.
     pub fn contains_key(&self, key: &str) -> bool {
         for i in 0..self.keys.len() {
-            let Some(k_idx) = self.keys.get(i) else { break };
+            let Some(k_idx) = self.keys.get(i) else { continue };
             let Some(k_bytes): Option<&'msg [u8]> = self.stringtable.get(k_idx as usize) else {
-                break;
+                continue;
             };
             if k_bytes == key.as_bytes() {
                 return true;
@@ -408,6 +408,7 @@ impl<'msg> Iterator for DenseNodeTagsIter<'msg> {
 /// omitted).
 ///
 /// [`DenseNodes`]: crate::protos::DenseNodes
+#[derive(Clone, Copy)]
 pub struct DenseNodeRef<'msg> {
     /// Node ID (DELTA-decoded).
     id: i64,
@@ -508,8 +509,17 @@ impl<'msg> DenseNodeRef<'msg> {
 ///
 /// Obtain via [`DenseNodesView::iter_nodes`].
 pub struct DenseNodeRefsIter<'msg> {
-    dense: DenseNodesView<'msg>,
     group: PrimitiveGroupRef<'msg>,
+    /// Cached `dense.id()` — avoids repeated accessor dispatch per node.
+    ids: RepeatedView<'msg, i64>,
+    /// Cached `dense.lat()`.
+    lats: RepeatedView<'msg, i64>,
+    /// Cached `dense.lon()`.
+    lons: RepeatedView<'msg, i64>,
+    /// Cached `dense.keys_vals()`.
+    keys_vals: RepeatedView<'msg, i32>,
+    /// Cached `keys_vals.len()`.
+    kv_len: usize,
     /// Index of the next node to decode.
     pos: usize,
     /// Current position in `keys_vals` (advances past each node's tag slice).
@@ -522,9 +532,18 @@ pub struct DenseNodeRefsIter<'msg> {
 impl<'msg> DenseNodeRefsIter<'msg> {
     #[inline]
     fn new(dense: DenseNodesView<'msg>, group: PrimitiveGroupRef<'msg>) -> Self {
+        let ids = dense.id();
+        let lats = dense.lat();
+        let lons = dense.lon();
+        let keys_vals = dense.keys_vals();
+        let kv_len = keys_vals.len();
         Self {
-            dense,
             group,
+            ids,
+            lats,
+            lons,
+            keys_vals,
+            kv_len,
             pos: 0,
             kv_pos: 0,
             acc_id: 0,
@@ -538,33 +557,29 @@ impl<'msg> Iterator for DenseNodeRefsIter<'msg> {
     type Item = DenseNodeRef<'msg>;
 
     fn next(&mut self) -> Option<DenseNodeRef<'msg>> {
-        if self.pos >= self.dense.id().len() {
+        if self.pos >= self.ids.len() {
             return None;
         }
 
         // Delta-decode coordinate columns.
-        self.acc_id += self.dense.id().get(self.pos)?;
-        self.acc_lat += self.dense.lat().get(self.pos)?;
-        self.acc_lon += self.dense.lon().get(self.pos)?;
+        self.acc_id += self.ids.get(self.pos)?;
+        self.acc_lat += self.lats.get(self.pos)?;
+        self.acc_lon += self.lons.get(self.pos)?;
         self.pos += 1;
 
         // Locate the keys_vals slice for this node.
-        let keys_vals = self.dense.keys_vals();
-        let kv_len = keys_vals.len();
         let kv_start = self.kv_pos;
-        let kv_end = if kv_len == 0 {
+        let kv_end = if self.kv_len == 0 {
             // keys_vals omitted — all nodes in this group are tagless.
             kv_start
         } else {
-            // TODO: try to optimize, by not requiring the kv_end bound on each iteration. (then DenseTaghs is not an exact-size iterator anymore)
-
             // Scan for the 0-delimiter that terminates this node's tag pairs.
             loop {
-                if self.kv_pos >= kv_len {
+                if self.kv_pos >= self.kv_len {
                     // Malformed: no delimiter found; consume remaining.
                     break self.kv_pos;
                 }
-                if keys_vals.get(self.kv_pos) == Some(0) {
+                if self.keys_vals.get(self.kv_pos) == Some(0) {
                     let end = self.kv_pos;
                     self.kv_pos += 1; // skip delimiter
                     break end;
@@ -577,7 +592,7 @@ impl<'msg> Iterator for DenseNodeRefsIter<'msg> {
             id: self.acc_id,
             lat: self.acc_lat,
             lon: self.acc_lon,
-            keys_vals,
+            keys_vals: self.keys_vals,
             kv_start,
             kv_end,
             group: self.group,
@@ -586,7 +601,7 @@ impl<'msg> Iterator for DenseNodeRefsIter<'msg> {
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.dense.id().len().saturating_sub(self.pos);
+        let remaining = self.ids.len().saturating_sub(self.pos);
         (remaining, Some(remaining))
     }
 }
@@ -870,6 +885,18 @@ impl<'msg, T: Proxied> std::ops::Deref for AbstractRef<'msg, T> {
         &self.view
     }
 }
+
+impl<'msg, T: Proxied> Clone for AbstractRef<'msg, T>
+where
+    T::View<'msg>: Copy,
+{
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'msg, T: Proxied> Copy for AbstractRef<'msg, T> where T::View<'msg>: Copy {}
 
 pub type NodeRef<'msg> = AbstractRef<'msg, Node>;
 pub type WayRef<'msg> = AbstractRef<'msg, Way>;
