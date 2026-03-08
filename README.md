@@ -14,10 +14,15 @@ WIP ⚠
 
 * Fast & Simple to use
 * Parallelizable with `rayon` using [`par_bridge`].
-* supports zlib & lzma compresses blobs
+* Supports zlib & lzma compressed blobs
+* Zero-copy streaming `Blob` parser: the compressed payload is read directly
+  from the stream into a pooled buffer — no intermediate copy through the
+  protobuf runtime arena. Buffers are returned to a shared [`BufPool`] after
+  decoding and reused across blobs.
 
 [`rayon`]: https://github.com/rayon-rs/rayon
 [`par_bridge`]: https://docs.rs/rayon/1.5.1/rayon/iter/trait.ParallelBridge.html#tymethod.par_bridge
+[`BufPool`]: https://docs.rs/osm-pbf-reader/latest/osm_pbf_reader/buf_pool/struct.BufPool.html
 
 ## License
 

@@ -26,6 +26,8 @@ pub mod buf_pool;
 pub mod data;
 pub mod error;
 pub mod header;
+pub mod raw_blob;
 
 pub use blob::{Blob, Blobs};
-pub use buf_pool::BufPool;
+pub use buf_pool::{BufPool, OwnedPoolBuf};
+pub use raw_blob::RawBlob;

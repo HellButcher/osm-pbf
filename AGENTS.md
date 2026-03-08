@@ -109,6 +109,33 @@ Allows efficient and parallel reading of `.pbf` files through memory-mapped file
 
 **Compression**: zlib (default via `zlib-ng-compat` feature) and lzma (via `lzma` feature). Both enabled by default.
 
+#### Key types
+
+| Type | Module | Description |
+|---|---|---|
+| `Blobs<R>` | `blob` | Main reader; iterates `OSMDataBlob` over a `BufRead` stream. Holds the parsed `OSMHeader`. |
+| `Blob<M>` | `blob` | `Encoded(RawBlob, Arc<BufPool>)` — lazy blob awaiting decompression; or `Decoded(M)` — fully parsed. |
+| `RawBlob` | `raw_blob` | Blob message parsed from the wire format without the protobuf runtime (see below). |
+| `RawBlobData` | `raw_blob` | Enum of payload variants: `Raw` \| `ZlibData` \| `LzmaData` \| `Lz4Data` \| `ZstdData` \| `ObsoleteBzip2Data` \| `NotSet`. Each holds an `OwnedPoolBuf`. |
+| `BufPool` | `buf_pool` | Thread-safe, lock-free pool of reusable `Vec<u8>` buffers (backed by `crossbeam_queue::SegQueue`). Shared between the reader and parallel workers to avoid per-blob allocations. |
+| `PoolBuf<'pool>` | `buf_pool` | RAII guard for a buffer borrowed from `BufPool`; returns on drop. |
+| `OwnedPoolBuf` | `buf_pool` | Like `PoolBuf` but holds `Arc<BufPool>`, so it can be stored inside `RawBlob` and outlive the `Blobs` reader. Returned by `BufPool::acquire_owned`. |
+
+#### `RawBlob` — streaming wire-format parser
+
+The protobuf-generated `Blob` type (from the UPB arena backend) copies the compressed payload bytes twice: once into the scratch buffer used by `read_exact`, and once into the UPB arena when `parse()` is called. For blobs up to 32 MiB this is significant overhead.
+
+`RawBlob::from_reader(reader, size, pool)` avoids this by reading protobuf fields one-by-one directly from the stream:
+- Scalar fields (`raw_size: int32`) are decoded as varints with no allocation.
+- Bytes payload fields (`raw`/`zlib_data`/etc.) are read with a single `read_exact` call into a buffer acquired from `pool` via `BufPool::acquire_owned` — **one allocation, one copy**.
+- Unknown fields are skipped; leftover bytes are drained so the stream stays correctly positioned.
+
+The `OwnedPoolBuf` holding the compressed bytes lives inside `RawBlobData` for the lifetime of `Blob::Encoded`. When `Blob::decode()` is called the buffer is decompressed, the inner protobuf message is parsed, and `RawBlob` is dropped — returning the buffer to the pool for the next blob.
+
+#### `next_blob()` public API
+
+`Blobs::next_blob()` returns `(PbfBlobHeader, RawBlob)` — the raw wire-decoded blob alongside its header. `PbfBlobHeader` is still parsed via the protobuf runtime (it is tiny: a string + int) while `RawBlob` is produced by the streaming parser.
+
 ## Key Conventions
 
 - **Error handling**: `thiserror` with `#[from]` for transparent wrapping of `io::Error`, `protobuf::Error`, `Utf8Error`. Prefer the crate-level `Result<T>` alias.

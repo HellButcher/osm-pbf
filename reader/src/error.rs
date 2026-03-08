@@ -29,6 +29,9 @@ pub enum Error {
 
     #[error("Unexpected Blob-Type {0}")]
     UnexpectedBlobType(String),
+
+    #[error("Invalid Format: Blob wire format is invalid")]
+    InvalidBlobFormat,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

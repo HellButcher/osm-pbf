@@ -1,9 +1,6 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use osm_pbf_proto::protobuf::Message;
-use osm_pbf_proto::protos::{
-    blob::DataOneof, Blob as PbfBlob, BlobHeader as PbfBlobHeader, HeaderBlock,
-    PrimitiveBlock as PbfPrimitiveBlock,
-};
+use osm_pbf_proto::protos::{BlobHeader as PbfBlobHeader, HeaderBlock, PrimitiveBlock as PbfPrimitiveBlock};
 use std::fs::File;
 use std::io::{self, Read};
 use std::iter;
@@ -13,13 +10,14 @@ use std::sync::Arc;
 use crate::buf_pool::BufPool;
 use crate::data::OSMDataBlob;
 use crate::error::{Error, Result};
+use crate::raw_blob::{RawBlob, RawBlobData};
 
 const MAX_HEADER_SIZE: u32 = 64 * 1024;
 const MAX_UNCOMPRESSED_DATA_SIZE: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub enum Blob<M> {
-    Encoded(PbfBlob, Arc<BufPool>),
+    Encoded(RawBlob, Arc<BufPool>),
     Decoded(M),
 }
 
@@ -47,36 +45,36 @@ impl<M: Message> Blob<M> {
     }
 }
 
-/// Decompresses and parses the inner message `M` from a `PbfBlob` into `out`.
+/// Decompresses and parses the inner message `M` from a [`RawBlob`] into `out`.
 ///
 /// `out` is cleared before use. When `raw_size` is present in the blob it is
 /// used to pre-size the buffer, avoiding repeated reallocations during
 /// decompression. The buffer is reused across calls when the caller provides
 /// the same `Vec`.
-fn decode_blob_into<M: Message>(blob: &PbfBlob, out: &mut Vec<u8>) -> Result<M> {
-    match blob.as_view().data() {
-        DataOneof::Raw(bytes) => Ok(M::parse(bytes)?),
+fn decode_blob_into<M: Message>(blob: &RawBlob, out: &mut Vec<u8>) -> Result<M> {
+    match &blob.data {
+        RawBlobData::Raw(bytes) => Ok(M::parse(bytes.as_slice())?),
         #[cfg(feature = "zlib")]
-        DataOneof::ZlibData(bytes) => {
+        RawBlobData::ZlibData(bytes) => {
             out.clear();
-            if blob.as_view().has_raw_size() {
-                let hint = (blob.as_view().raw_size() as usize).min(MAX_UNCOMPRESSED_DATA_SIZE);
+            if let Some(raw_size) = blob.raw_size {
+                let hint = (raw_size as usize).min(MAX_UNCOMPRESSED_DATA_SIZE);
                 out.reserve(hint);
             }
-            flate2::bufread::ZlibDecoder::new(bytes).read_to_end(out)?;
+            flate2::bufread::ZlibDecoder::new(bytes.as_slice()).read_to_end(out)?;
             Ok(M::parse(out)?)
         }
         #[cfg(feature = "lzma")]
-        DataOneof::LzmaData(bytes) => {
+        RawBlobData::LzmaData(bytes) => {
             out.clear();
-            if blob.as_view().has_raw_size() {
-                let hint = (blob.as_view().raw_size() as usize).min(MAX_UNCOMPRESSED_DATA_SIZE);
+            if let Some(raw_size) = blob.raw_size {
+                let hint = (raw_size as usize).min(MAX_UNCOMPRESSED_DATA_SIZE);
                 out.reserve(hint);
             }
-            xz2::bufread::XzDecoder::new(bytes).read_to_end(out)?;
+            xz2::bufread::XzDecoder::new(bytes.as_slice()).read_to_end(out)?;
             Ok(M::parse(out)?)
         }
-        DataOneof::not_set(_) => Ok(M::default()),
+        RawBlobData::NotSet => Ok(M::default()),
         _ => Err(Error::UnsupportedEncoding),
     }
 }
@@ -200,11 +198,11 @@ impl<R: io::BufRead> Blobs<R> {
         Ok(M::parse(&self.buf)?)
     }
 
-    pub fn next_blob(&mut self) -> Result<Option<(PbfBlobHeader, PbfBlob)>> {
+    pub fn next_blob(&mut self) -> Result<Option<(PbfBlobHeader, RawBlob)>> {
         let Some(header) = self._read_blob_header()? else {
             return Ok(None);
         };
-        let blob: PbfBlob = self.read_msg_exact(header.as_view().datasize() as usize)?;
+        let blob = RawBlob::from_reader(&mut self.reader, header.as_view().datasize() as usize, &self.pool)?;
         Ok(Some((header, blob)))
     }
 
@@ -216,7 +214,7 @@ impl<R: io::BufRead> Blobs<R> {
         if blob_type.as_bytes() != b"OSMHeader" {
             return Err(Error::UnexpectedBlobType(blob_type.to_string()));
         }
-        let blob: PbfBlob = self.read_msg_exact(header.as_view().datasize() as usize)?;
+        let blob = RawBlob::from_reader(&mut self.reader, header.as_view().datasize() as usize, &self.pool)?;
         self.header = decode_blob_into(&blob, &mut self.buf)?;
         Ok(())
     }
@@ -229,7 +227,7 @@ impl<R: io::BufRead> Blobs<R> {
         if blob_type.as_bytes() != b"OSMData" {
             return Err(Error::UnexpectedBlobType(blob_type.to_string()));
         }
-        let blob: PbfBlob = self.read_msg_exact(header.as_view().datasize() as usize)?;
+        let blob = RawBlob::from_reader(&mut self.reader, header.as_view().datasize() as usize, &self.pool)?;
         Ok(Some(Blob::Encoded(blob, Arc::clone(&self.pool))))
     }
 

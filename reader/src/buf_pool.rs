@@ -2,6 +2,7 @@
 
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 use crossbeam_queue::SegQueue;
 
@@ -49,7 +50,19 @@ impl BufPool {
         }
     }
 
-    fn release(&self, mut buf: Vec<u8>) {
+    /// Like [`Self::acquire`] but returns an [`OwnedPoolBuf`] that keeps an
+    /// [`Arc`] clone of the pool, so the buffer can outlive the borrow of
+    /// `self` (e.g. when stored inside a [`RawBlob`](crate::raw_blob::RawBlob)
+    /// for deferred parallel decoding).
+    pub fn acquire_owned(self: &Arc<Self>) -> OwnedPoolBuf {
+        let buf = self.queue.pop().unwrap_or_default();
+        OwnedPoolBuf {
+            buf: ManuallyDrop::new(buf),
+            pool: Arc::clone(self),
+        }
+    }
+
+    pub(crate) fn release(&self, mut buf: Vec<u8>) {
         buf.clear();
         self.queue.push(buf);
     }
@@ -85,5 +98,65 @@ impl Drop for PoolBuf<'_> {
         // SAFETY: `buf` is only taken here, in `drop`, which runs exactly once.
         let buf = unsafe { ManuallyDrop::take(&mut self.buf) };
         self.pool.release(buf);
+    }
+}
+
+/// An owned byte buffer checked out from a [`BufPool`].
+///
+/// Like [`PoolBuf`] but holds an [`Arc`] reference to the pool instead of a
+/// borrow, allowing it to outlive the original `&BufPool`.  The buffer is
+/// cleared and returned to the pool when this value is dropped.
+///
+/// Obtain one via [`BufPool::acquire_owned`].
+pub struct OwnedPoolBuf {
+    buf: ManuallyDrop<Vec<u8>>,
+    pool: Arc<BufPool>,
+}
+
+impl OwnedPoolBuf {
+    /// Returns the pool this buffer belongs to.
+    #[inline]
+    pub fn pool(&self) -> &Arc<BufPool> {
+        &self.pool
+    }
+}
+
+impl Deref for OwnedPoolBuf {
+    type Target = Vec<u8>;
+
+    #[inline]
+    fn deref(&self) -> &Vec<u8> {
+        &self.buf
+    }
+}
+
+impl DerefMut for OwnedPoolBuf {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
+    }
+}
+
+impl Drop for OwnedPoolBuf {
+    fn drop(&mut self) {
+        // SAFETY: `buf` is only taken here, in `drop`, which runs exactly once.
+        let buf = unsafe { ManuallyDrop::take(&mut self.buf) };
+        self.pool.release(buf);
+    }
+}
+
+impl Clone for OwnedPoolBuf {
+    fn clone(&self) -> Self {
+        let mut new_buf = self.pool.acquire_owned();
+        new_buf.extend_from_slice(&self.buf);
+        new_buf
+    }
+}
+
+impl std::fmt::Debug for OwnedPoolBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedPoolBuf")
+            .field("len", &self.buf.len())
+            .finish()
     }
 }
