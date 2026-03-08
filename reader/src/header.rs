@@ -1,4 +1,4 @@
-pub use osm_pbf_proto::osmformat::HeaderBlock;
+pub use osm_pbf_proto::protos::HeaderBlock;
 
 // REQUIRED FEATURES
 pub const DENSE_NODES: &str = "DenseNodes";

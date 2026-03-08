@@ -12,9 +12,6 @@
 //!
 //! Both regular [`NodeRef`] and [`DenseNodeRef`] values are wrapped in the
 //! [`AnyNodeRef`] enum, which exposes `id`, `lat`, and `lon` uniformly.
-//! Match on the variant to access tags or decoded coordinates:
-//! - `Regular(n)` — call `n.tags()`, `n.lat_deg()`, `n.lon_deg()` directly.
-//! - `Dense(n)` — call `n.tags()`, `n.lat_deg()`, `n.lon_deg()` directly.
 //!
 //! # Context-aware element refs
 //!
@@ -73,7 +70,8 @@ use std::str;
 use protobuf::{ProtoBytes, Proxied, RepeatedView};
 
 use crate::protos::{
-    ChangeSet, DenseNodesView, Node, PrimitiveBlockView, PrimitiveGroupView, Relation, Way,
+    ChangeSet, DenseNodesView, Node, PrimitiveBlock, PrimitiveBlockView, PrimitiveGroupView,
+    Relation, Way,
 };
 
 // ── ElementTypes ──────────────────────────────────────────────────────────────
@@ -429,14 +427,44 @@ impl<'msg> DenseNodeRef<'msg> {
         self.id
     }
 
+    /// Returns the raw latitude value (same encoding as [`NodeView::lat`]).
+    ///
+    /// This value is DELTA-decoded but not yet converted to degrees. Use `lat_deg()` for
+    /// the decoded latitude in degrees.
     #[inline]
-    pub fn lat(&self) -> i64 {
+    pub fn lat_raw(&self) -> i64 {
         self.lat
     }
 
+    /// Returns the raw longitude value (same encoding as [`NodeView::lon`]).
+    ///
+    /// This value is DELTA-decoded but not yet converted to degrees. Use `lon_deg()` for
+    /// the decoded longitude in degrees.
     #[inline]
-    pub fn lon(&self) -> i64 {
+    pub fn lon_raw(&self) -> i64 {
         self.lon
+    }
+
+    /// Decodes the latitude to nano-degrees using the parent block's offset and
+    /// granularity.
+    #[inline]
+    pub fn lat_nano(&self) -> i64 {
+        decode_coordinate_nano(
+            self.lat,
+            self.group.block.lat_offset(),
+            self.group.block.granularity(),
+        )
+    }
+
+    /// Decodes the longitude to nano-degrees using the parent block's offset and
+    /// granularity.
+    #[inline]
+    pub fn lon_nano(&self) -> i64 {
+        decode_coordinate_nano(
+            self.lon,
+            self.group.block.lon_offset(),
+            self.group.block.granularity(),
+        )
     }
 
     /// Decodes the latitude to degrees using the parent block's offset and
@@ -572,7 +600,7 @@ impl std::iter::ExactSizeIterator for DenseNodeRefsIter<'_> {}
 /// decoded [`DenseNodeRef`]).
 ///
 /// Both variants carry a [`PrimitiveGroupRef`] for full block context.
-/// Use `id()`, `lat()`, `lon()`, `lat_deg()`, and `lon_deg()` directly on
+/// Use `id()`, `lat_nano()`, `lon_nano()`, `lat_deg()`, and `lon_deg()` directly on
 /// `AnyNodeRef`. For tag access, match on the variant: `Regular(n)` provides
 /// `n.tags()` returning [`Tags`]; `Dense(n)` provides `n.tags()` returning
 /// [`DenseNodeTags`].
@@ -594,20 +622,46 @@ impl<'msg> AnyNodeRef<'msg> {
     }
 
     /// Returns the raw latitude value (same encoding as [`NodeView::lat`]).
+    ///
+    /// This value is DELTA-decoded but not yet converted to degrees. Use `llat_deg()` for
+    /// the decoded latitude in degrees.
     #[inline]
-    pub fn lat(&self) -> i64 {
+    pub fn lat_raw(&self) -> i64 {
         match self {
-            Self::Regular(n) => n.lat(),
-            Self::Dense(n) => n.lat(),
+            Self::Regular(n) => n.lat_raw(),
+            Self::Dense(n) => n.lat_raw(),
         }
     }
 
     /// Returns the raw longitude value (same encoding as [`NodeView::lon`]).
+    ///
+    /// This value is DELTA-decoded but not yet converted to degrees. Use `lon_deg()` for
+    /// the decoded longitude in degrees.
     #[inline]
-    pub fn lon(&self) -> i64 {
+    pub fn lon_raw(&self) -> i64 {
         match self {
-            Self::Regular(n) => n.lon(),
-            Self::Dense(n) => n.lon(),
+            Self::Regular(n) => n.lon_raw(),
+            Self::Dense(n) => n.lon_raw(),
+        }
+    }
+
+    /// Decodes the latitude to nano-degrees using the parent block's offset and
+    /// granularity.
+    #[inline]
+    pub fn lat_nano(&self) -> i64 {
+        match self {
+            Self::Regular(n) => n.lat_nano(),
+            Self::Dense(n) => n.lat_nano(),
+        }
+    }
+
+    /// Decodes the longitude to nano-degrees using the parent block's offset and
+    /// granularity.
+    #[inline]
+    pub fn lon_nano(&self) -> i64 {
+        match self {
+            Self::Regular(n) => n.lon_nano(),
+            Self::Dense(n) => n.lon_nano(),
         }
     }
 
@@ -749,7 +803,10 @@ impl<'msg> PrimitiveGroupRef<'msg> {
     /// entirely — its elements are never decoded. Per the OSM PBF spec, each
     /// `PrimitiveGroup` holds exactly one element type, so this check is O(1).
     #[inline]
-    pub fn iter_filtered_elements(self, types: ElementTypes) -> impl Iterator<Item = Element<'msg>> {
+    pub fn iter_filtered_elements(
+        self,
+        types: ElementTypes,
+    ) -> impl Iterator<Item = Element<'msg>> {
         group_type_flags(self.view)
             .intersects(types)
             .then(move || self.iter_elements())
@@ -831,10 +888,50 @@ impl<'msg> NodeRef<'msg> {
         Tags::new(self.view.keys(), self.view.vals(), self.group.stringtable)
     }
 
+    /// Returns the raw latitude value (same encoding as [`NodeView::lat`]).
+    ///
+    /// This value is DELTA-decoded but not yet converted to degrees. Use `lat_deg()` for
+    /// the decoded latitude in degrees.
+    #[inline]
+    pub fn lat_raw(&self) -> i64 {
+        self.view.lat()
+    }
+
+    /// Returns the raw longitude value (same encoding as [`NodeView::lon`]).
+    ///
+    /// This value is DELTA-decoded but not yet converted to degrees. Use `lon_deg()` for
+    /// the decoded longitude in degrees.
+    #[inline]
+    pub fn lon_raw(&self) -> i64 {
+        self.view.lon()
+    }
+
+    /// Decodes the latitude to nano-degrees using the parent block's offset and
+    /// granularity.
+    #[inline]
+    pub fn lat_nano(&self) -> i64 {
+        decode_coordinate_nano(
+            self.view.lat(),
+            self.group.block.lat_offset(),
+            self.group.block.granularity(),
+        )
+    }
+
+    /// Decodes the longitude to nano-degrees using the parent block's offset and
+    /// granularity.
+    #[inline]
+    pub fn lon_nano(&self) -> i64 {
+        decode_coordinate_nano(
+            self.view.lon(),
+            self.group.block.lon_offset(),
+            self.group.block.granularity(),
+        )
+    }
+
     /// Decodes the latitude to degrees using the parent block's offset and
     /// granularity.
     ///
-    /// Equivalent to `decode_coordinate(self.lat(), block.lat_offset(), block.granularity())`.
+    /// Equivalent to `decode_coordinate(self.lat_raw(), block.lat_offset(), block.granularity())`.
     #[inline]
     pub fn lat_deg(&self) -> f64 {
         decode_coordinate(
@@ -847,7 +944,7 @@ impl<'msg> NodeRef<'msg> {
     /// Decodes the longitude to degrees using the parent block's offset and
     /// granularity.
     ///
-    /// Equivalent to `decode_coordinate(self.lon(), block.lon_offset(), block.granularity())`.
+    /// Equivalent to `decode_coordinate(self.lon_raw(), block.lon_offset(), block.granularity())`.
     #[inline]
     pub fn lon_deg(&self) -> f64 {
         decode_coordinate(
@@ -912,8 +1009,8 @@ pub enum Element<'msg> {
 /// Example:
 ///
 /// ```ignore
-/// let lat_deg = decode_coordinate(node.lat(), block.lat_offset(), block.granularity());
-/// let lon_deg = decode_coordinate(node.lon(), block.lon_offset(), block.granularity());
+/// let lat_deg = decode_coordinate(node.lat_raw(), block.lat_offset(), block.granularity());
+/// let lon_deg = decode_coordinate(node.lon_raw(), block.lon_offset(), block.granularity());
 /// ```
 ///
 /// `granularity` defaults to 100 (nanodegrees per unit) and offsets default to
@@ -922,7 +1019,33 @@ pub enum Element<'msg> {
 /// [`PrimitiveBlock`]: crate::protos::PrimitiveBlock
 #[inline]
 pub fn decode_coordinate(raw: i64, offset: i64, granularity: i32) -> f64 {
-    (offset + granularity as i64 * raw) as f64 / 1_000_000_000.0
+    decode_coordinate_nano(raw, offset, granularity) as f64 / 1_000_000_000.0
+}
+
+/// Decodes a raw stored coordinate value to nano-degrees.
+///
+/// Uses the official OSM PBF formula (where all values are from the enclosing
+/// [`PrimitiveBlock`]):
+///
+/// ```text
+/// latitude  = lat_offset + granularity * lat
+/// longitude = lon_offset + granularity * lon
+/// ```
+///
+/// Example:
+///
+/// ```ignore
+/// let lat_nano = decode_coordinate_nano(node.lat_raw(), block.lat_offset(), block.granularity());
+/// let lon_nano = decode_coordinate_nano(node.lon_raw(), block.lon_offset(), block.granularity());
+/// ```
+///
+/// `granularity` defaults to 100 (nanodegrees per unit) and offsets default to
+/// 0; both are stored in the `PrimitiveBlock` header.
+///
+/// [`PrimitiveBlock`]: crate::protos::PrimitiveBlock
+#[inline]
+pub fn decode_coordinate_nano(raw: i64, offset: i64, granularity: i32) -> i64 {
+    offset + granularity as i64 * raw
 }
 
 // ── PrimitiveBlockView inherent methods ───────────────────────────────────────
@@ -946,13 +1069,15 @@ impl<'msg> PrimitiveBlockView<'msg> {
     /// Returns an iterator over all dense nodes across all groups.
     #[inline]
     pub fn iter_dense_nodes(self) -> impl Iterator<Item = DenseNodeRef<'msg>> {
-        self.iter_groups().flat_map(PrimitiveGroupRef::iter_dense_nodes)
+        self.iter_groups()
+            .flat_map(PrimitiveGroupRef::iter_dense_nodes)
     }
 
     /// Returns an iterator over all nodes across all groups as [`AnyNodeRef`] values.
     #[inline]
     pub fn iter_all_nodes(self) -> impl Iterator<Item = AnyNodeRef<'msg>> {
-        self.iter_groups().flat_map(PrimitiveGroupRef::iter_all_nodes)
+        self.iter_groups()
+            .flat_map(PrimitiveGroupRef::iter_all_nodes)
     }
 
     /// Returns an iterator over all ways across all groups.
@@ -964,19 +1089,22 @@ impl<'msg> PrimitiveBlockView<'msg> {
     /// Returns an iterator over all relations across all groups.
     #[inline]
     pub fn iter_relations(self) -> impl Iterator<Item = RelationRef<'msg>> {
-        self.iter_groups().flat_map(PrimitiveGroupRef::iter_relations)
+        self.iter_groups()
+            .flat_map(PrimitiveGroupRef::iter_relations)
     }
 
     /// Returns an iterator over all changesets across all groups.
     #[inline]
     pub fn iter_changesets(self) -> impl Iterator<Item = ChangeSetRef<'msg>> {
-        self.iter_groups().flat_map(PrimitiveGroupRef::iter_changesets)
+        self.iter_groups()
+            .flat_map(PrimitiveGroupRef::iter_changesets)
     }
 
     /// Returns an iterator over all elements across all groups, in group order.
     #[inline]
     pub fn iter_elements(self) -> impl Iterator<Item = Element<'msg>> {
-        self.iter_groups().flat_map(PrimitiveGroupRef::iter_elements)
+        self.iter_groups()
+            .flat_map(PrimitiveGroupRef::iter_elements)
     }
 
     /// Returns an iterator over elements across all groups, filtered by `types`.
@@ -991,8 +1119,79 @@ impl<'msg> PrimitiveBlockView<'msg> {
     /// for element in block.iter_filtered_elements(types) { ... }
     /// ```
     #[inline]
-    pub fn iter_filtered_elements(self, types: ElementTypes) -> impl Iterator<Item = Element<'msg>> {
+    pub fn iter_filtered_elements(
+        self,
+        types: ElementTypes,
+    ) -> impl Iterator<Item = Element<'msg>> {
         self.iter_groups()
             .flat_map(move |g| g.iter_filtered_elements(types))
+    }
+}
+
+// ── PrimitiveBlock alias methods ─────────────────────────────────────────────
+impl PrimitiveBlock {
+    /// Returns an iterator over all groups in this block as [`PrimitiveGroupRef`]
+    /// values, each carrying the block's coordinate context and string table.
+    #[inline]
+    pub fn iter_groups(&self) -> impl Iterator<Item = PrimitiveGroupRef<'_>> {
+        self.as_view().iter_groups()
+    }
+
+    /// Returns an iterator over all regular (non-dense) nodes across all groups.
+    #[inline]
+    pub fn iter_nodes(&self) -> impl Iterator<Item = NodeRef<'_>> {
+        self.as_view().iter_nodes()
+    }
+
+    /// Returns an iterator over all dense nodes across all groups.
+    #[inline]
+    pub fn iter_dense_nodes(&self) -> impl Iterator<Item = DenseNodeRef<'_>> {
+        self.as_view().iter_dense_nodes()
+    }
+
+    /// Returns an iterator over all nodes across all groups as [`AnyNodeRef`] values.
+    #[inline]
+    pub fn iter_all_nodes(&self) -> impl Iterator<Item = AnyNodeRef<'_>> {
+        self.as_view().iter_all_nodes()
+    }
+
+    /// Returns an iterator over all ways across all groups.
+    #[inline]
+    pub fn iter_ways(&self) -> impl Iterator<Item = WayRef<'_>> {
+        self.as_view().iter_ways()
+    }
+
+    /// Returns an iterator over all relations across all groups.
+    #[inline]
+    pub fn iter_relations(&self) -> impl Iterator<Item = RelationRef<'_>> {
+        self.as_view().iter_relations()
+    }
+
+    /// Returns an iterator over all changesets across all groups.
+    #[inline]
+    pub fn iter_changesets(&self) -> impl Iterator<Item = ChangeSetRef<'_>> {
+        self.as_view().iter_changesets()
+    }
+
+    /// Returns an iterator over all elements across all groups, in group order.
+    #[inline]
+    pub fn iter_elements(&self) -> impl Iterator<Item = Element<'_>> {
+        self.as_view().iter_elements()
+    }
+
+    /// Returns an iterator over elements across all groups, filtered by `types`.
+    ///
+    /// Groups whose element type is not in `types` are skipped entirely —
+    /// their contents are never decoded. Per the OSM PBF spec, each group
+    /// holds exactly one element type, so the per-group check is O(1).
+    ///
+    /// ```ignore
+    /// // Iterate only nodes and ways, skipping relation and changeset groups:
+    /// let types = ElementTypes::NODES | ElementTypes::WAYS;
+    /// for element in block.iter_filtered_elements(types) { ... }
+    /// ```
+    #[inline]
+    pub fn iter_filtered_elements(&self, types: ElementTypes) -> impl Iterator<Item = Element<'_>> {
+        self.as_view().iter_filtered_elements(types)
     }
 }

@@ -8,8 +8,8 @@ pub enum Error {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
 
-    #[error(transparent)]
-    ProtobufError(#[from] osm_pbf_proto::protobuf::Error),
+    #[error("Protobuf parse error")]
+    ParseError(#[from] osm_pbf_proto::protobuf::ParseError),
 
     #[error(transparent)]
     Utf8Error(#[from] Utf8Error),
