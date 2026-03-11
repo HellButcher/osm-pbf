@@ -1,252 +1,330 @@
-use byteorder::{BigEndian, ReadBytesExt};
-use osm_pbf_proto::protobuf::Message;
-use osm_pbf_proto::protos::{BlobHeader as PbfBlobHeader, HeaderBlock, PrimitiveBlock as PbfPrimitiveBlock};
-use std::fs::File;
+//! Zero-copy streaming parser for the OSM PBF `Blob` message.
+//!
+//! The protobuf-generated `Blob` type uses the UPB arena under the hood, which
+//! means parsing it requires first reading all bytes into a scratch buffer and
+//! then copying the contained payload (raw/zlib_data/…) into the arena — two
+//! copies of potentially 32 MiB of compressed data.
+//!
+//! [`RawBlob::from_reader`] bypasses the protobuf runtime entirely and reads
+//! the wire format field-by-field, placing the bytes payload directly into a
+//! buffer acquired from a [`BufPool`].  Only one allocation (at most) and one
+//! copy are needed, and the buffer is returned to the pool once the blob is
+//! decoded and dropped.
+
 use std::io::{self, Read};
-use std::iter;
-use std::path::Path;
+use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::buf_pool::BufPool;
-use crate::data::OSMDataBlob;
-use crate::error::{Error, Result};
-use crate::raw_blob::{RawBlob, RawBlobData};
+use osm_pbf_proto::protobuf::Message;
 
-const MAX_HEADER_SIZE: u32 = 64 * 1024;
-const MAX_UNCOMPRESSED_DATA_SIZE: usize = 32 * 1024 * 1024;
+use crate::buf_pool::{BufPool, PoolBuf};
+use crate::error::{Error, Result};
+
+pub const MAX_UNCOMPRESSED_DATA_SIZE: usize = 32 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+pub struct BlobBuf(PoolBuf);
+
+impl BlobBuf {
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for BlobBuf {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl Deref for BlobBuf {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The data payload carried by a [`RawBlob`].
+#[derive(Clone, Debug)]
+pub enum BlobData {
+    NotSet,
+    Raw(BlobBuf),
+    ZlibData(BlobBuf),
+    LzmaData(BlobBuf),
+    ObsoleteBzip2Data(BlobBuf),
+    Lz4Data(BlobBuf),
+    ZstdData(BlobBuf),
+}
+
+/// A parsed OSM PBF `Blob` message, decoded without the protobuf runtime.
+///
+/// Created by [`RawBlob::from_reader`].  Use [`RawBlobData`] to access the
+/// payload bytes, then decompress and parse the inner `PrimitiveBlock` /
+/// `HeaderBlock` as usual.
+#[derive(Clone, Debug)]
+pub struct RawBlob {
+    /// Uncompressed size hint (field 2 in the proto), when the data is
+    /// compressed.  Used to pre-size the decompression buffer.
+    pub raw_size: Option<i32>,
+    /// The data payload (one of the `oneof data` variants).
+    pub data: BlobData,
+}
+
+impl RawBlob {
+    pub const NOT_SET: Self = Self {
+        raw_size: None,
+        data: BlobData::NotSet,
+    };
+
+    /// Parses a `RawBlob` by reading exactly `size` bytes from `reader`.
+    ///
+    /// Reads protobuf fields one-by-one directly from the stream.  When a
+    /// bytes payload field is encountered, a buffer is acquired from `pool`
+    /// and the contents are read in a single `read_exact` call — no
+    /// intermediate copy.  Unknown fields are skipped.  Any bytes left over
+    /// after parsing (which should not occur for well-formed input) are
+    /// drained to leave the stream correctly positioned.
+    pub(crate) fn from_reader<R: Read>(
+        reader: &mut R,
+        size: usize,
+        pool: &Arc<BufPool>,
+    ) -> Result<Self> {
+        let mut limited = reader.take(size as u64);
+        let mut raw_size: Option<i32> = None;
+        let mut data = BlobData::NotSet;
+
+        loop {
+            let tag = match read_varint(&mut limited) {
+                Ok(v) => v,
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(Error::IoError(e)),
+            };
+
+            let field_number = tag >> 3;
+            let wire_type = tag & 0x7;
+
+            match (field_number, wire_type) {
+                // raw_size: optional int32 (field 2, varint)
+                (2, 0) => {
+                    let v = read_varint(&mut limited).map_err(Error::IoError)?;
+                    raw_size = Some(v as i32);
+                }
+                // data payload: bytes fields (fields 1,3–7, length-delimited)
+                (1 | 3 | 4 | 5 | 6 | 7, 2) => {
+                    let len = read_varint(&mut limited).map_err(Error::IoError)? as usize;
+                    let bytes = read_bytes_pooled(&mut limited, len, pool)?;
+                    data = match field_number {
+                        1 => BlobData::Raw(bytes),
+                        3 => BlobData::ZlibData(bytes),
+                        4 => BlobData::LzmaData(bytes),
+                        5 => BlobData::ObsoleteBzip2Data(bytes),
+                        6 => BlobData::Lz4Data(bytes),
+                        7 => BlobData::ZstdData(bytes),
+                        _ => unreachable!(),
+                    };
+                }
+                // Unknown varint field — skip the value.
+                (_, 0) => {
+                    read_varint(&mut limited).map_err(Error::IoError)?;
+                }
+                // Unknown length-delimited field — skip the payload.
+                (_, 2) => {
+                    let len = read_varint(&mut limited).map_err(Error::IoError)? as usize;
+                    skip_bytes(&mut limited, len)?;
+                }
+                // Fixed 64-bit field.
+                (_, 1) => skip_bytes(&mut limited, 8)?,
+                // Fixed 32-bit field.
+                (_, 5) => skip_bytes(&mut limited, 4)?,
+                _ => return Err(Error::InvalidBlobFormat),
+            }
+        }
+
+        // Drain any remaining bytes to keep the stream correctly positioned.
+        io::copy(&mut limited, &mut io::sink()).map_err(Error::IoError)?;
+
+        Ok(Self { raw_size, data })
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        match self.data {
+            BlobData::NotSet => true,
+            BlobData::Raw(ref bytes)
+            | BlobData::ZlibData(ref bytes)
+            | BlobData::LzmaData(ref bytes)
+            | BlobData::ObsoleteBzip2Data(ref bytes)
+            | BlobData::Lz4Data(ref bytes)
+            | BlobData::ZstdData(ref bytes) => bytes.is_empty(),
+        }
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        match self.data {
+            BlobData::NotSet => &[],
+            BlobData::Raw(ref bytes)
+            | BlobData::ZlibData(ref bytes)
+            | BlobData::LzmaData(ref bytes)
+            | BlobData::ObsoleteBzip2Data(ref bytes)
+            | BlobData::Lz4Data(ref bytes)
+            | BlobData::ZstdData(ref bytes) => bytes.as_slice(),
+        }
+    }
+
+    pub fn decompress(&mut self) -> Result<&[u8]> {
+        if let Some(decompressed) = self.decompressed()? {
+            self.data = BlobData::Raw(decompressed);
+            if let BlobData::Raw(ref bytes) = self.data {
+                return Ok(bytes.as_slice());
+            } else {
+                unreachable!();
+            }
+        }
+        match self.data {
+            BlobData::NotSet => Ok(&[]),
+            BlobData::Raw(ref buf) => Ok(buf.as_slice()),
+            _ => Err(Error::UnsupportedEncoding),
+        }
+    }
+
+    pub fn into_decompressed(mut self) -> Result<BlobBuf> {
+        if let Some(decompressed) = self.decompressed()? {
+            return Ok(decompressed);
+        }
+        match std::mem::replace(&mut self.data, BlobData::NotSet) {
+            BlobData::Raw(buf) => Ok(buf),
+            _ => Err(Error::UnsupportedEncoding),
+        }
+    }
+
+    pub fn decompressed(&self) -> Result<Option<BlobBuf>> {
+        fn get_buf_and_resize(src_buf: &BlobBuf, raw_size: Option<i32>) -> PoolBuf {
+            let mut dest_buf = src_buf.0.acquire_owned();
+            if let Some(raw_size) = raw_size {
+                let hint = (raw_size as usize).min(MAX_UNCOMPRESSED_DATA_SIZE);
+                dest_buf.reserve(hint);
+            }
+            dest_buf
+        }
+        match &self.data {
+            BlobData::NotSet | BlobData::Raw(_) => Ok(None),
+            #[cfg(feature = "zlib")]
+            BlobData::ZlibData(src_buf) => {
+                let mut dest_buf = get_buf_and_resize(src_buf, self.raw_size);
+                flate2::bufread::ZlibDecoder::new(src_buf.as_slice()).read_to_end(&mut dest_buf)?;
+                Ok(Some(BlobBuf(dest_buf)))
+            }
+            #[cfg(feature = "lzma")]
+            BlobData::LzmaData(src_buf) => {
+                let mut dest_buf = get_buf_and_resize(src_buf, self.raw_size);
+                xz2::bufread::XzDecoder::new(src_buf.as_slice()).read_to_end(&mut dest_buf)?;
+                Ok(Some(BlobBuf(dest_buf)))
+            }
+            _ => Err(Error::UnsupportedEncoding),
+        }
+    }
+
+    pub fn decode<M: Message>(&mut self) -> Result<M> {
+        let bytes = self.decompress()?;
+        let msg = M::parse(bytes)?;
+        Ok(msg)
+    }
+
+    /// Decompresses and parses the inner message `M` from a [`RawBlob`] into `out`.
+    ///
+    /// `out` is cleared before use. When `raw_size` is present in the blob it is
+    /// used to pre-size the buffer, avoiding repeated reallocations during
+    /// decompression. The buffer is reused across calls when the caller provides
+    /// the same `Vec`.
+    pub fn into_decoded<M: Message>(mut self) -> Result<M> {
+        let bytes = self.decompress()?;
+        let msg = M::parse(bytes)?;
+        Ok(msg)
+    }
+
+    pub fn decoded<M: Message>(&self) -> Result<M> {
+        if let Some(decompressed) = self.decompressed()? {
+            let msg = M::parse(decompressed.as_slice())?;
+            return Ok(msg);
+        }
+        let bytes = match self.data {
+            BlobData::NotSet => &[],
+            BlobData::Raw(ref buf) => buf.as_slice(),
+            _ => return Err(Error::UnsupportedEncoding),
+        };
+        let msg = M::parse(bytes)?;
+        Ok(msg)
+    }
+}
+
+/// Reads a protobuf varint from `reader`.
+///
+/// Returns `Err(UnexpectedEof)` when the reader is empty at the start of the
+/// first byte (signals end-of-message to the caller).
+fn read_varint<R: Read>(reader: &mut R) -> io::Result<u64> {
+    let mut result = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte)?;
+        let b = byte[0];
+        result |= ((b & 0x7F) as u64) << shift;
+        if b & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "varint overflow",
+            ));
+        }
+    }
+}
+
+fn read_bytes_pooled<R: Read>(reader: &mut R, len: usize, pool: &Arc<BufPool>) -> Result<BlobBuf> {
+    let mut buf = pool.acquire();
+    buf.resize(len, 0);
+    reader.read_to_end(&mut buf).map_err(Error::IoError)?;
+    Ok(BlobBuf(buf))
+}
+
+fn skip_bytes<R: Read>(reader: &mut R, len: usize) -> Result<()> {
+    io::copy(&mut reader.take(len as u64), &mut io::sink()).map_err(Error::IoError)?;
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 pub enum Blob<M> {
-    Encoded(RawBlob, Arc<BufPool>),
+    Encoded(RawBlob),
     Decoded(M),
 }
 
 impl<M: Message> Blob<M> {
-    pub fn decode_into(mut self) -> Result<M> {
-        self.decode()?;
-        let Self::Decoded(d) = self else {
-            unreachable!();
-        };
-        Ok(d)
+    #[inline]
+    pub fn into_decoded(self) -> Result<M> {
+        match self {
+            Self::Encoded(r) => r.into_decoded(),
+            Self::Decoded(m) => Ok(m),
+        }
     }
 
     pub fn decode(&mut self) -> Result<&mut M> {
-        if let Self::Encoded(blob, pool) = self {
-            let m = {
-                let mut buf = pool.acquire();
-                decode_blob_into(blob, &mut buf)?
-            };
-            *self = Self::Decoded(m);
-        }
-        let Self::Decoded(d) = self else {
-            unreachable!();
-        };
-        Ok(d)
-    }
-}
-
-/// Decompresses and parses the inner message `M` from a [`RawBlob`] into `out`.
-///
-/// `out` is cleared before use. When `raw_size` is present in the blob it is
-/// used to pre-size the buffer, avoiding repeated reallocations during
-/// decompression. The buffer is reused across calls when the caller provides
-/// the same `Vec`.
-fn decode_blob_into<M: Message>(blob: &RawBlob, out: &mut Vec<u8>) -> Result<M> {
-    match &blob.data {
-        RawBlobData::Raw(bytes) => Ok(M::parse(bytes.as_slice())?),
-        #[cfg(feature = "zlib")]
-        RawBlobData::ZlibData(bytes) => {
-            out.clear();
-            if let Some(raw_size) = blob.raw_size {
-                let hint = (raw_size as usize).min(MAX_UNCOMPRESSED_DATA_SIZE);
-                out.reserve(hint);
+        match self {
+            Self::Decoded(m) => Ok(m),
+            Self::Encoded(blob) => {
+                let m = blob.decoded()?;
+                *self = Self::Decoded(m);
+                if let Self::Decoded(ref mut m) = self {
+                    Ok(m)
+                } else {
+                    unreachable!()
+                }
             }
-            flate2::bufread::ZlibDecoder::new(bytes.as_slice()).read_to_end(out)?;
-            Ok(M::parse(out)?)
         }
-        #[cfg(feature = "lzma")]
-        RawBlobData::LzmaData(bytes) => {
-            out.clear();
-            if let Some(raw_size) = blob.raw_size {
-                let hint = (raw_size as usize).min(MAX_UNCOMPRESSED_DATA_SIZE);
-                out.reserve(hint);
-            }
-            xz2::bufread::XzDecoder::new(bytes.as_slice()).read_to_end(out)?;
-            Ok(M::parse(out)?)
-        }
-        RawBlobData::NotSet => Ok(M::default()),
-        _ => Err(Error::UnsupportedEncoding),
     }
 }
-
-#[derive(Debug)]
-pub struct Blobs<R> {
-    header: HeaderBlock,
-    reader: R,
-    /// Reusable scratch buffer for reading raw blob bytes off the wire.
-    buf: Vec<u8>,
-    /// Shared pool of decompression buffers.
-    pool: Arc<BufPool>,
-}
-
-impl<R> Blobs<R> {
-    #[inline]
-    pub fn into_reader(self) -> R {
-        self.reader
-    }
-
-    #[inline]
-    pub fn header(&self) -> &HeaderBlock {
-        &self.header
-    }
-
-    /// Returns a clone of the shared decompression buffer pool.
-    ///
-    /// Workers that decode blobs in parallel can share this pool to avoid
-    /// per-blob heap allocations:
-    ///
-    /// ```ignore
-    /// let pool = blobs.pool();
-    /// rayon::scope(|s| {
-    ///     for blob in &mut blobs {
-    ///         let pool = Arc::clone(&pool);
-    ///         s.spawn(move |_| { blob.decode_into_with_pool(&pool).unwrap(); });
-    ///     }
-    /// });
-    /// ```
-    #[inline]
-    pub fn pool(&self) -> Arc<BufPool> {
-        Arc::clone(&self.pool)
-    }
-}
-
-impl<R: AsRef<[u8]>> Blobs<io::Cursor<R>> {
-    #[inline]
-    pub fn from_bytes(bytes: R) -> Result<Self> {
-        Self::from_buf_read(io::Cursor::new(bytes))
-    }
-}
-
-impl<R: Read> Blobs<io::BufReader<R>> {
-    #[inline]
-    pub fn from_read(read: R) -> Result<Self> {
-        Self::from_buf_read(io::BufReader::new(read))
-    }
-}
-
-impl Blobs<io::BufReader<File>> {
-    #[inline]
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::open(path)?;
-        Self::from_read(file)
-    }
-}
-
-impl<R: io::Seek> Blobs<R> {
-    #[inline]
-    pub fn rewind(&mut self) -> Result<()> {
-        self.reader.rewind()?;
-        Ok(())
-    }
-}
-
-impl<R: io::BufRead> Blobs<R> {
-    #[inline]
-    pub fn from_buf_read(reader: R) -> Result<Self> {
-        Self::from_buf_read_with_pool(reader, Arc::new(BufPool::new()))
-    }
-
-    /// Like [`Self::from_buf_read`] but uses the provided pool for
-    /// decompression buffers, allowing callers to share a pool with
-    /// their parallel workers.
-    #[inline]
-    pub fn from_buf_read_with_pool(reader: R, pool: Arc<BufPool>) -> Result<Self> {
-        let mut r = Self {
-            header: HeaderBlock::default(),
-            reader,
-            buf: Vec::new(),
-            pool,
-        };
-        r._read_header_block()?;
-        Ok(r)
-    }
-
-    fn _read_blob_header(&mut self) -> Result<Option<PbfBlobHeader>> {
-        let header_size = match self.reader.read_u32::<BigEndian>() {
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                return Ok(None); // Expected EOF
-            }
-            Err(e) => return Err(Error::IoError(e)),
-            Ok(header_size) if header_size > MAX_HEADER_SIZE => {
-                return Err(Error::BlobHeaderToLarge);
-            }
-            Ok(header_size) => header_size as usize,
-        };
-
-        let header: PbfBlobHeader = self.read_msg_exact(header_size)?;
-        let data_size = header.as_view().datasize() as usize;
-        if data_size > MAX_UNCOMPRESSED_DATA_SIZE {
-            return Err(Error::BlobDataToLarge);
-        }
-        Ok(Some(header))
-    }
-
-    fn read_msg_exact<M: Message>(&mut self, exact_size: usize) -> Result<M> {
-        self.buf.clear();
-        self.buf.resize(exact_size, 0);
-        self.reader.read_exact(&mut self.buf)?;
-        Ok(M::parse(&self.buf)?)
-    }
-
-    pub fn next_blob(&mut self) -> Result<Option<(PbfBlobHeader, RawBlob)>> {
-        let Some(header) = self._read_blob_header()? else {
-            return Ok(None);
-        };
-        let blob = RawBlob::from_reader(&mut self.reader, header.as_view().datasize() as usize, &self.pool)?;
-        Ok(Some((header, blob)))
-    }
-
-    fn _read_header_block(&mut self) -> Result<()> {
-        let Some(header) = self._read_blob_header()? else {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        };
-        let blob_type = header.as_view().r#type();
-        if blob_type.as_bytes() != b"OSMHeader" {
-            return Err(Error::UnexpectedBlobType(blob_type.to_string()));
-        }
-        let blob = RawBlob::from_reader(&mut self.reader, header.as_view().datasize() as usize, &self.pool)?;
-        self.header = decode_blob_into(&blob, &mut self.buf)?;
-        Ok(())
-    }
-
-    pub fn next_primitive_block(&mut self) -> Result<Option<OSMDataBlob>> {
-        let Some(header) = self._read_blob_header()? else {
-            return Ok(None);
-        };
-        let blob_type = header.as_view().r#type();
-        if blob_type.as_bytes() != b"OSMData" {
-            return Err(Error::UnexpectedBlobType(blob_type.to_string()));
-        }
-        let blob = RawBlob::from_reader(&mut self.reader, header.as_view().datasize() as usize, &self.pool)?;
-        Ok(Some(Blob::Encoded(blob, Arc::clone(&self.pool))))
-    }
-
-    pub fn next_primitive_block_decoded(&mut self) -> Result<Option<PbfPrimitiveBlock>> {
-        let Some(blob) = self.next_primitive_block()? else {
-            return Ok(None);
-        };
-        let decoded = blob.decode_into()?;
-        Ok(Some(decoded))
-    }
-}
-
-impl<R: io::BufRead> Iterator for Blobs<R> {
-    type Item = Result<OSMDataBlob>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Result<OSMDataBlob>> {
-        self.next_primitive_block().transpose()
-    }
-}
-
-impl<R: io::BufRead> iter::FusedIterator for Blobs<R> {}

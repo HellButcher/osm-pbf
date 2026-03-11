@@ -39,65 +39,21 @@ impl BufPool {
         Self::default()
     }
 
-    /// Checks out a buffer from the pool (or allocates a fresh one if the
-    /// pool is empty). The buffer is returned to the pool when the
-    /// [`PoolBuf`] guard is dropped.
-    pub fn acquire(&self) -> PoolBuf<'_> {
-        let buf = self.queue.pop().unwrap_or_default();
-        PoolBuf {
-            buf: ManuallyDrop::new(buf),
-            pool: self,
-        }
-    }
-
     /// Like [`Self::acquire`] but returns an [`OwnedPoolBuf`] that keeps an
     /// [`Arc`] clone of the pool, so the buffer can outlive the borrow of
     /// `self` (e.g. when stored inside a [`RawBlob`](crate::raw_blob::RawBlob)
     /// for deferred parallel decoding).
-    pub fn acquire_owned(self: &Arc<Self>) -> OwnedPoolBuf {
+    pub fn acquire(self: &Arc<Self>) -> PoolBuf {
         let buf = self.queue.pop().unwrap_or_default();
-        OwnedPoolBuf {
+        PoolBuf {
             buf: ManuallyDrop::new(buf),
             pool: Arc::clone(self),
         }
     }
 
-    pub(crate) fn release(&self, mut buf: Vec<u8>) {
+    fn release(&self, mut buf: Vec<u8>) {
         buf.clear();
         self.queue.push(buf);
-    }
-}
-
-/// A byte buffer checked out from a [`BufPool`].
-///
-/// Derefs to `Vec<u8>`. The buffer is cleared and returned to the pool
-/// automatically when this guard is dropped.
-pub struct PoolBuf<'pool> {
-    buf: ManuallyDrop<Vec<u8>>,
-    pool: &'pool BufPool,
-}
-
-impl Deref for PoolBuf<'_> {
-    type Target = Vec<u8>;
-
-    #[inline]
-    fn deref(&self) -> &Vec<u8> {
-        &self.buf
-    }
-}
-
-impl DerefMut for PoolBuf<'_> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.buf
-    }
-}
-
-impl Drop for PoolBuf<'_> {
-    fn drop(&mut self) {
-        // SAFETY: `buf` is only taken here, in `drop`, which runs exactly once.
-        let buf = unsafe { ManuallyDrop::take(&mut self.buf) };
-        self.pool.release(buf);
     }
 }
 
@@ -108,20 +64,19 @@ impl Drop for PoolBuf<'_> {
 /// cleared and returned to the pool when this value is dropped.
 ///
 /// Obtain one via [`BufPool::acquire_owned`].
-pub struct OwnedPoolBuf {
+pub struct PoolBuf {
     buf: ManuallyDrop<Vec<u8>>,
     pool: Arc<BufPool>,
 }
 
-impl OwnedPoolBuf {
-    /// Returns the pool this buffer belongs to.
+impl PoolBuf {
     #[inline]
-    pub fn pool(&self) -> &Arc<BufPool> {
-        &self.pool
+    pub fn acquire_owned(&self) -> Self {
+        self.pool.acquire()
     }
 }
 
-impl Deref for OwnedPoolBuf {
+impl Deref for PoolBuf {
     type Target = Vec<u8>;
 
     #[inline]
@@ -130,14 +85,14 @@ impl Deref for OwnedPoolBuf {
     }
 }
 
-impl DerefMut for OwnedPoolBuf {
+impl DerefMut for PoolBuf {
     #[inline]
     fn deref_mut(&mut self) -> &mut Vec<u8> {
         &mut self.buf
     }
 }
 
-impl Drop for OwnedPoolBuf {
+impl Drop for PoolBuf {
     fn drop(&mut self) {
         // SAFETY: `buf` is only taken here, in `drop`, which runs exactly once.
         let buf = unsafe { ManuallyDrop::take(&mut self.buf) };
@@ -145,15 +100,15 @@ impl Drop for OwnedPoolBuf {
     }
 }
 
-impl Clone for OwnedPoolBuf {
+impl Clone for PoolBuf {
     fn clone(&self) -> Self {
-        let mut new_buf = self.pool.acquire_owned();
+        let mut new_buf = self.pool.acquire();
         new_buf.extend_from_slice(&self.buf);
         new_buf
     }
 }
 
-impl std::fmt::Debug for OwnedPoolBuf {
+impl std::fmt::Debug for PoolBuf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OwnedPoolBuf")
             .field("len", &self.buf.len())

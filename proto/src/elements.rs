@@ -162,7 +162,9 @@ impl<'msg> Tags<'msg> {
     /// Returns `true` if this element has a tag with the given key.
     pub fn contains_key(&self, key: &str) -> bool {
         for i in 0..self.keys.len() {
-            let Some(k_idx) = self.keys.get(i) else { continue };
+            let Some(k_idx) = self.keys.get(i) else {
+                continue;
+            };
             let Some(k_bytes): Option<&'msg [u8]> = self.stringtable.get(k_idx as usize) else {
                 continue;
             };
