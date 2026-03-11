@@ -7,4 +7,4 @@ pub mod primitives {
     pub use osm_pbf_proto::protos::{ChangeSet, Info, Node, Relation, Way};
 }
 
-pub type OSMDataBlob = crate::blob::Blob<PrimitiveBlock>;
+pub type OSMDataBlob<'a> = crate::blob::Blob<'a, PrimitiveBlock>;

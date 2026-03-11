@@ -10,4 +10,4 @@ pub const SORT_TYPE_THEN_ID: &str = "Sort.Type_then_ID";
 pub const SORT_GEOGRAPHIC: &str = "Sort.Geographic";
 pub const LOCATIONS_ON_WAYS: &str = "LocationsOnWays";
 
-pub type OSMHeaderBlob = crate::blob::Blob<HeaderBlock>;
+pub type OSMHeaderBlob<'a> = crate::blob::Blob<'a, HeaderBlock>;

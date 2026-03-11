@@ -11,6 +11,7 @@
 //! copy are needed, and the buffer is returned to the pool once the blob is
 //! decoded and dropped.
 
+use std::fmt::Debug;
 use std::io::{self, Read};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -23,40 +24,46 @@ use crate::error::{Error, Result};
 pub const MAX_UNCOMPRESSED_DATA_SIZE: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
-pub struct BlobBuf(PoolBuf);
+pub enum BlobBuf<'a> {
+    PoolBuf(PoolBuf),
+    Slice(&'a [u8], Arc<BufPool>),
+}
 
-impl BlobBuf {
+impl BlobBuf<'_> {
     pub fn as_slice(&self) -> &[u8] {
-        self.0.as_slice()
+        match self {
+            BlobBuf::PoolBuf(pool_buf) => pool_buf.as_slice(),
+            BlobBuf::Slice(slice, _) => slice,
+        }
     }
 }
 
-impl AsRef<[u8]> for BlobBuf {
+impl AsRef<[u8]> for BlobBuf<'_> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        self.0.as_slice()
+        self.as_slice()
     }
 }
 
-impl Deref for BlobBuf {
+impl Deref for BlobBuf<'_> {
     type Target = [u8];
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.as_slice()
     }
 }
 
 /// The data payload carried by a [`RawBlob`].
 #[derive(Clone, Debug)]
-pub enum BlobData {
+pub enum BlobData<'a> {
     NotSet,
-    Raw(BlobBuf),
-    ZlibData(BlobBuf),
-    LzmaData(BlobBuf),
-    ObsoleteBzip2Data(BlobBuf),
-    Lz4Data(BlobBuf),
-    ZstdData(BlobBuf),
+    Raw(BlobBuf<'a>),
+    ZlibData(BlobBuf<'a>),
+    LzmaData(BlobBuf<'a>),
+    ObsoleteBzip2Data(BlobBuf<'a>),
+    Lz4Data(BlobBuf<'a>),
+    ZstdData(BlobBuf<'a>),
 }
 
 /// A parsed OSM PBF `Blob` message, decoded without the protobuf runtime.
@@ -65,15 +72,15 @@ pub enum BlobData {
 /// payload bytes, then decompress and parse the inner `PrimitiveBlock` /
 /// `HeaderBlock` as usual.
 #[derive(Clone, Debug)]
-pub struct RawBlob {
+pub struct RawBlob<'a> {
     /// Uncompressed size hint (field 2 in the proto), when the data is
     /// compressed.  Used to pre-size the decompression buffer.
     pub raw_size: Option<i32>,
     /// The data payload (one of the `oneof data` variants).
-    pub data: BlobData,
+    pub data: BlobData<'a>,
 }
 
-impl RawBlob {
+impl<'a> RawBlob<'a> {
     pub const NOT_SET: Self = Self {
         raw_size: None,
         data: BlobData::NotSet,
@@ -149,6 +156,65 @@ impl RawBlob {
         Ok(Self { raw_size, data })
     }
 
+    pub(crate) fn from_bytes(mut bytes: &'a [u8], pool: &Arc<BufPool>) -> Result<Self> {
+        let mut raw_size: Option<i32> = None;
+        let mut data = BlobData::NotSet;
+        loop {
+            let tag = match read_varint(&mut bytes) {
+                Ok(v) => v,
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(Error::IoError(e)),
+            };
+
+            let field_number = tag >> 3;
+            let wire_type = tag & 0x7;
+
+            match (field_number, wire_type) {
+                // raw_size: optional int32 (field 2, varint)
+                (2, 0) => {
+                    let v = read_varint_slice(&mut bytes).map_err(Error::IoError)?;
+                    raw_size = Some(v as i32);
+                }
+                // data payload: bytes fields (fields 1,3–7, length-delimited)
+                (1 | 3 | 4 | 5 | 6 | 7, 2) => {
+                    let len = read_varint_slice(&mut bytes).map_err(Error::IoError)? as usize;
+                    if len > bytes.len() {
+                        return Err(Error::InvalidBlobFormat);
+                    }
+                    let bytes_buf = BlobBuf::Slice(&bytes[..len], pool.clone());
+                    bytes = &bytes[len..];
+                    data = match field_number {
+                        1 => BlobData::Raw(bytes_buf),
+                        3 => BlobData::ZlibData(bytes_buf),
+                        4 => BlobData::LzmaData(bytes_buf),
+                        5 => BlobData::ObsoleteBzip2Data(bytes_buf),
+                        6 => BlobData::Lz4Data(bytes_buf),
+                        7 => BlobData::ZstdData(bytes_buf),
+                        _ => unreachable!(),
+                    };
+                }
+                // Unknown varint field — skip the value.
+                (_, 0) => {
+                    read_varint(&mut bytes).map_err(Error::IoError)?;
+                }
+                // Unknown length-delimited field — skip the payload.
+                (_, 2) => {
+                    let len = read_varint_slice(&mut bytes).map_err(Error::IoError)? as usize;
+                    if len > bytes.len() {
+                        return Err(Error::InvalidBlobFormat);
+                    }
+                    skip_bytes_slice(&mut bytes, len)?;
+                }
+                // Fixed 64-bit field.
+                (_, 1) => skip_bytes_slice(&mut bytes, 8)?,
+                // Fixed 32-bit field.
+                (_, 5) => skip_bytes_slice(&mut bytes, 4)?,
+                _ => return Err(Error::InvalidBlobFormat),
+            }
+        }
+        Ok(Self { raw_size, data })
+    }
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         match self.data {
@@ -191,7 +257,7 @@ impl RawBlob {
         }
     }
 
-    pub fn into_decompressed(mut self) -> Result<BlobBuf> {
+    pub fn into_decompressed(mut self) -> Result<BlobBuf<'a>> {
         if let Some(decompressed) = self.decompressed()? {
             return Ok(decompressed);
         }
@@ -201,9 +267,12 @@ impl RawBlob {
         }
     }
 
-    pub fn decompressed(&self) -> Result<Option<BlobBuf>> {
-        fn get_buf_and_reserve(src_buf: &BlobBuf, raw_size: Option<i32>) -> PoolBuf {
-            let mut dest_buf = src_buf.0.acquire_owned();
+    pub fn decompressed(&self) -> Result<Option<BlobBuf<'static>>> {
+        fn get_buf_and_reserve(src_buf: &BlobBuf<'_>, raw_size: Option<i32>) -> PoolBuf {
+            let mut dest_buf = match src_buf {
+                BlobBuf::PoolBuf(b) => b.acquire(),
+                BlobBuf::Slice(_, pool) => pool.acquire(),
+            };
             if let Some(raw_size) = raw_size {
                 let hint = (raw_size as usize).min(MAX_UNCOMPRESSED_DATA_SIZE);
                 dest_buf.reserve(hint);
@@ -216,13 +285,13 @@ impl RawBlob {
             BlobData::ZlibData(src_buf) => {
                 let mut dest_buf = get_buf_and_reserve(src_buf, self.raw_size);
                 flate2::bufread::ZlibDecoder::new(src_buf.as_slice()).read_to_end(&mut dest_buf)?;
-                Ok(Some(BlobBuf(dest_buf)))
+                Ok(Some(BlobBuf::PoolBuf(dest_buf)))
             }
             #[cfg(feature = "lzma")]
             BlobData::LzmaData(src_buf) => {
                 let mut dest_buf = get_buf_and_reserve(src_buf, self.raw_size);
                 xz2::bufread::XzDecoder::new(src_buf.as_slice()).read_to_end(&mut dest_buf)?;
-                Ok(Some(BlobBuf(dest_buf)))
+                Ok(Some(BlobBuf::PoolBuf(dest_buf)))
             }
             _ => Err(Error::UnsupportedEncoding),
         }
@@ -286,11 +355,20 @@ fn read_varint<R: Read>(reader: &mut R) -> io::Result<u64> {
     }
 }
 
-fn read_bytes_pooled<R: Read>(reader: &mut R, len: usize, pool: &Arc<BufPool>) -> Result<BlobBuf> {
+#[inline]
+fn read_varint_slice(bytes: &mut &[u8]) -> io::Result<u64> {
+    read_varint(bytes)
+}
+
+fn read_bytes_pooled<R: Read>(
+    reader: &mut R,
+    len: usize,
+    pool: &Arc<BufPool>,
+) -> Result<BlobBuf<'static>> {
     let mut buf = pool.acquire();
     buf.resize(len, 0);
     reader.read_exact(&mut buf).map_err(Error::IoError)?;
-    Ok(BlobBuf(buf))
+    Ok(BlobBuf::PoolBuf(buf))
 }
 
 fn skip_bytes<R: Read>(reader: &mut R, len: usize) -> Result<()> {
@@ -298,13 +376,21 @@ fn skip_bytes<R: Read>(reader: &mut R, len: usize) -> Result<()> {
     Ok(())
 }
 
+fn skip_bytes_slice(reader: &mut &[u8], len: usize) -> Result<()> {
+    if len > reader.len() {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    *reader = &reader[len..];
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
-pub enum Blob<M> {
-    Encoded(RawBlob),
+pub enum Blob<'a, M> {
+    Encoded(RawBlob<'a>),
     Decoded(M),
 }
 
-impl<M: Message> Blob<M> {
+impl<M: Message> Blob<'_, M> {
     #[inline]
     pub fn into_decoded(self) -> Result<M> {
         match self {

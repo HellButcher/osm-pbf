@@ -71,7 +71,7 @@ pub struct PoolBuf {
 
 impl PoolBuf {
     #[inline]
-    pub fn acquire_owned(&self) -> Self {
+    pub fn acquire(&self) -> Self {
         self.pool.acquire()
     }
 }
