@@ -202,7 +202,7 @@ impl RawBlob {
     }
 
     pub fn decompressed(&self) -> Result<Option<BlobBuf>> {
-        fn get_buf_and_resize(src_buf: &BlobBuf, raw_size: Option<i32>) -> PoolBuf {
+        fn get_buf_and_reserve(src_buf: &BlobBuf, raw_size: Option<i32>) -> PoolBuf {
             let mut dest_buf = src_buf.0.acquire_owned();
             if let Some(raw_size) = raw_size {
                 let hint = (raw_size as usize).min(MAX_UNCOMPRESSED_DATA_SIZE);
@@ -214,13 +214,13 @@ impl RawBlob {
             BlobData::NotSet | BlobData::Raw(_) => Ok(None),
             #[cfg(feature = "zlib")]
             BlobData::ZlibData(src_buf) => {
-                let mut dest_buf = get_buf_and_resize(src_buf, self.raw_size);
+                let mut dest_buf = get_buf_and_reserve(src_buf, self.raw_size);
                 flate2::bufread::ZlibDecoder::new(src_buf.as_slice()).read_to_end(&mut dest_buf)?;
                 Ok(Some(BlobBuf(dest_buf)))
             }
             #[cfg(feature = "lzma")]
             BlobData::LzmaData(src_buf) => {
-                let mut dest_buf = get_buf_and_resize(src_buf, self.raw_size);
+                let mut dest_buf = get_buf_and_reserve(src_buf, self.raw_size);
                 xz2::bufread::XzDecoder::new(src_buf.as_slice()).read_to_end(&mut dest_buf)?;
                 Ok(Some(BlobBuf(dest_buf)))
             }
@@ -289,7 +289,7 @@ fn read_varint<R: Read>(reader: &mut R) -> io::Result<u64> {
 fn read_bytes_pooled<R: Read>(reader: &mut R, len: usize, pool: &Arc<BufPool>) -> Result<BlobBuf> {
     let mut buf = pool.acquire();
     buf.resize(len, 0);
-    reader.read_to_end(&mut buf).map_err(Error::IoError)?;
+    reader.read_exact(&mut buf).map_err(Error::IoError)?;
     Ok(BlobBuf(buf))
 }
 
