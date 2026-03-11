@@ -22,6 +22,7 @@
     clippy::wildcard_imports
 )]
 pub mod blob;
+mod buf_pool;
 pub mod data;
 pub mod error;
 pub mod header;
