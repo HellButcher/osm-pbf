@@ -1,5 +1,5 @@
 use byteorder::{BigEndian, ReadBytesExt};
-use osm_pbf_proto::protobuf::Message;
+use osm_pbf_proto::protobuf::ClearAndParse;
 use osm_pbf_proto::protos::{
     BlobHeader as PbfBlobHeader, HeaderBlock, PrimitiveBlock as PbfPrimitiveBlock,
 };
@@ -22,6 +22,7 @@ pub struct Blobs<R> {
     reader: R,
     /// Reusable scratch buffer for reading raw blob bytes off the wire.
     buf: Vec<u8>,
+    curent_blob_header: PbfBlobHeader,
     /// Shared pool of decompression buffers.
     pool: Arc<BufPool>,
 }
@@ -82,6 +83,7 @@ impl<R: io::BufRead> Blobs<R> {
         let mut r = Self {
             header: HeaderBlock::default(),
             reader,
+            curent_blob_header: PbfBlobHeader::default(),
             buf: Vec::new(),
             pool,
         };
@@ -89,10 +91,10 @@ impl<R: io::BufRead> Blobs<R> {
         Ok(r)
     }
 
-    fn _read_blob_header(&mut self) -> Result<Option<PbfBlobHeader>> {
+    fn _read_blob_header(&mut self) -> Result<bool> {
         let header_size = match self.reader.read_u32::<BigEndian>() {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                return Ok(None); // Expected EOF
+                return Ok(false); // Expected EOF
             }
             Err(e) => return Err(Error::IoError(e)),
             Ok(header_size) if header_size > MAX_HEADER_SIZE => {
@@ -100,64 +102,65 @@ impl<R: io::BufRead> Blobs<R> {
             }
             Ok(header_size) => header_size as usize,
         };
-
-        let header: PbfBlobHeader = self.read_msg_exact(header_size)?;
-        let data_size = header.as_view().datasize() as usize;
+        self.buf_read_exact(header_size)?;
+        self.curent_blob_header.clear_and_parse(&self.buf)?;
+        let data_size = self.curent_blob_header.as_view().datasize() as usize;
         if data_size > MAX_UNCOMPRESSED_DATA_SIZE {
             return Err(Error::BlobDataToLarge);
         }
-        Ok(Some(header))
+        Ok(true)
     }
 
-    fn read_msg_exact<M: Message>(&mut self, exact_size: usize) -> Result<M> {
+    fn buf_read_exact(&mut self, exact_size: usize) -> Result<()> {
         self.buf.clear();
         self.buf.resize(exact_size, 0);
         self.reader.read_exact(&mut self.buf)?;
-        Ok(M::parse(&self.buf)?)
+        Ok(())
     }
 
-    pub fn next_blob(&mut self) -> Result<Option<(PbfBlobHeader, RawBlob)>> {
-        let Some(header) = self._read_blob_header()? else {
+    pub fn next_blob(&mut self) -> Result<Option<(&PbfBlobHeader, RawBlob)>> {
+        if !self._read_blob_header()? {
             return Ok(None);
         };
         let blob = RawBlob::from_reader(
             &mut self.reader,
-            header.as_view().datasize() as usize,
+            self.curent_blob_header.as_view().datasize() as usize,
             &self.pool,
         )?;
-        Ok(Some((header, blob)))
+        Ok(Some((&self.curent_blob_header, blob)))
     }
 
-    fn _read_header_block(&mut self) -> Result<()> {
-        let Some(header) = self._read_blob_header()? else {
-            return Err(io::ErrorKind::UnexpectedEof.into());
+    pub fn next_blob_expected(
+        &mut self,
+        expected_blob_type: &str,
+    ) -> Result<Option<(&PbfBlobHeader, RawBlob)>> {
+        if !self._read_blob_header()? {
+            return Ok(None);
         };
-        let blob_type = header.as_view().r#type();
-        if blob_type.as_bytes() != b"OSMHeader" {
+        let blob_type = self.curent_blob_header.as_view().r#type();
+        if blob_type.as_bytes() != expected_blob_type.as_bytes() {
             return Err(Error::UnexpectedBlobType(blob_type.to_string()));
         }
         let blob = RawBlob::from_reader(
             &mut self.reader,
-            header.as_view().datasize() as usize,
+            self.curent_blob_header.as_view().datasize() as usize,
             &self.pool,
         )?;
+        Ok(Some((&self.curent_blob_header, blob)))
+    }
+
+    fn _read_header_block(&mut self) -> Result<()> {
+        let Some((_, blob)) = self.next_blob_expected("OSMHeader")? else {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        };
         self.header = blob.into_decoded()?;
         Ok(())
     }
 
     pub fn next_primitive_block(&mut self) -> Result<Option<OSMDataBlob>> {
-        let Some(header) = self._read_blob_header()? else {
+        let Some((_, blob)) = self.next_blob_expected("OSMData")? else {
             return Ok(None);
         };
-        let blob_type = header.as_view().r#type();
-        if blob_type.as_bytes() != b"OSMData" {
-            return Err(Error::UnexpectedBlobType(blob_type.to_string()));
-        }
-        let blob = RawBlob::from_reader(
-            &mut self.reader,
-            header.as_view().datasize() as usize,
-            &self.pool,
-        )?;
         Ok(Some(Blob::Encoded(blob)))
     }
 
