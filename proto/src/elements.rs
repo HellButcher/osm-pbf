@@ -70,8 +70,8 @@ use std::str;
 use protobuf::{ProtoBytes, Proxied, RepeatedView};
 
 use crate::protos::{
-    ChangeSet, DenseNodesView, Node, PrimitiveBlock, PrimitiveBlockView, PrimitiveGroupView,
-    Relation, Way,
+    relation, ChangeSet, DenseNodesView, Node, PrimitiveBlock, PrimitiveBlockView,
+    PrimitiveGroupView, Relation, Way,
 };
 
 // ── ElementTypes ──────────────────────────────────────────────────────────────
@@ -984,6 +984,42 @@ impl<'msg> NodeRef<'msg> {
     }
 }
 
+// ── WayNodeRefsIter ───────────────────────────────────────────────────────────
+
+/// Iterator that delta-decodes a way's node-reference list and yields absolute
+/// node IDs.
+///
+/// Way `refs` are stored as `sint64` packed deltas: each stored value is the
+/// difference from the previous ID (starting from zero). This iterator
+/// accumulates the running sum and yields the resulting absolute node IDs.
+///
+/// Obtain via [`WayRef::refs`].
+pub struct WayNodeRefsIter<'msg> {
+    refs: RepeatedView<'msg, i64>,
+    pos: usize,
+    acc: i64,
+}
+
+impl Iterator for WayNodeRefsIter<'_> {
+    type Item = i64;
+
+    #[inline]
+    fn next(&mut self) -> Option<i64> {
+        let delta = self.refs.get(self.pos)?;
+        self.acc += delta;
+        self.pos += 1;
+        Some(self.acc)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.refs.len().saturating_sub(self.pos);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for WayNodeRefsIter<'_> {}
+
 // ── WayRef impls ──────────────────────────────────────────────────────────────
 
 impl<'msg> WayRef<'msg> {
@@ -992,7 +1028,95 @@ impl<'msg> WayRef<'msg> {
     pub fn tags(&self) -> Tags<'msg> {
         Tags::new(self.view.keys(), self.view.vals(), self.group.stringtable)
     }
+
+    /// Returns an iterator that delta-decodes this way's node references and
+    /// yields absolute node IDs.
+    ///
+    /// Way `refs` are delta-encoded: each stored value is the difference from
+    /// the preceding ID. The iterator accumulates the running sum to produce
+    /// absolute IDs.
+    #[inline]
+    pub fn refs(&self) -> WayNodeRefsIter<'msg> {
+        WayNodeRefsIter {
+            refs: self.view.refs(),
+            pos: 0,
+            acc: 0,
+        }
+    }
 }
+
+// ── RelationMember ────────────────────────────────────────────────────────────
+
+/// A single decoded member of an OSM [`RelationRef`].
+///
+/// Relation members are stored as three parallel packed arrays:
+/// - `memids` — DELTA-encoded member IDs (`sint64`)
+/// - `roles_sid` — string-table indices for the member role (`int32`)
+/// - `types` — [`MemberType`] enum values
+///
+/// This struct holds one fully decoded entry.
+///
+/// [`MemberType`]: relation::MemberType
+#[derive(Clone, Copy)]
+pub struct RelationMember<'msg> {
+    /// Absolute member ID (DELTA-decoded from `memids`).
+    pub id: i64,
+    /// Role string (resolved from the block's string table), or `""` if the
+    /// index is out of range or the bytes are not valid UTF-8.
+    pub role: &'msg str,
+    /// Member type: node, way, or relation.
+    pub member_type: relation::MemberType,
+}
+
+// ── RelationMembersIter ───────────────────────────────────────────────────────
+
+/// Iterator over the members of an OSM [`RelationRef`].
+///
+/// Iterates the three parallel arrays (`memids`, `roles_sid`, `types`) in
+/// lock-step, delta-decoding member IDs and resolving role strings from the
+/// block's string table.
+///
+/// Obtain via [`RelationRef::members`].
+pub struct RelationMembersIter<'msg> {
+    memids: RepeatedView<'msg, i64>,
+    roles_sid: RepeatedView<'msg, i32>,
+    types: RepeatedView<'msg, relation::MemberType>,
+    stringtable: RepeatedView<'msg, ProtoBytes>,
+    pos: usize,
+    acc: i64,
+}
+
+impl<'msg> Iterator for RelationMembersIter<'msg> {
+    type Item = RelationMember<'msg>;
+
+    fn next(&mut self) -> Option<RelationMember<'msg>> {
+        let delta = self.memids.get(self.pos)?;
+        self.acc += delta;
+        let role_idx = self.roles_sid.get(self.pos)? as u32 as usize;
+        let member_type = self.types.get(self.pos)?;
+        self.pos += 1;
+
+        let role = self
+            .stringtable
+            .get(role_idx)
+            .and_then(|b| str::from_utf8(b).ok())
+            .unwrap_or("");
+
+        Some(RelationMember {
+            id: self.acc,
+            role,
+            member_type,
+        })
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.memids.len().saturating_sub(self.pos);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for RelationMembersIter<'_> {}
 
 // ── RelationRef impls ─────────────────────────────────────────────────────────
 
@@ -1001,6 +1125,23 @@ impl<'msg> RelationRef<'msg> {
     #[inline]
     pub fn tags(&self) -> Tags<'msg> {
         Tags::new(self.view.keys(), self.view.vals(), self.group.stringtable)
+    }
+
+    /// Returns an iterator over this relation's members.
+    ///
+    /// Member IDs (`memids`) are delta-encoded; the iterator decodes them to
+    /// absolute IDs. Roles are resolved from the block's string table. Member
+    /// type (node / way / relation) is taken from the `types` array.
+    #[inline]
+    pub fn members(&self) -> RelationMembersIter<'msg> {
+        RelationMembersIter {
+            memids: self.view.memids(),
+            roles_sid: self.view.roles_sid(),
+            types: self.view.types(),
+            stringtable: self.group.stringtable,
+            pos: 0,
+            acc: 0,
+        }
     }
 }
 
